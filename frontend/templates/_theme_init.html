@@ -1,0 +1,19 @@
+<script>
+    (function () {
+        try {
+            var stored = localStorage.getItem("easta_theme");
+            var theme = (stored === "light" || stored === "dark")
+                ? stored
+                : (
+                    window.matchMedia &&
+                    window.matchMedia("(prefers-color-scheme: dark)").matches
+                        ? "dark"
+                        : "light"
+                );
+            document.documentElement.setAttribute("data-theme", theme);
+        } catch (error) {
+            // localStorage/matchMedia unavailable -- the default light
+            // palette in styles.css applies with no attribute set.
+        }
+    })();
+</script>

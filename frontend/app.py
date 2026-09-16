@@ -61,3 +61,11 @@ def usage():
         "usage.html",
         backend_url=BACKEND_URL,
     )
+
+
+@app.get("/account")
+def account():
+    return render_template(
+        "account.html",
+        backend_url=BACKEND_URL,
+    )

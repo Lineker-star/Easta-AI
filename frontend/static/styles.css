@@ -48,6 +48,44 @@
     color-scheme: light;
 }
 
+/* --- dark theme --------------------------------------------------------
+   Same token names as :root above, redefined under [data-theme="dark"]
+   (stamped on <html> by the inline snippet in each page's <head> — see
+   frontend/templates/_theme_init.html) so every component that already
+   uses var(--color-*) picks up the theme with no per-component changes.
+   Deep warm charcoal surfaces, the same terracotta accent (brightened a
+   touch for contrast on dark backgrounds), light cream text. */
+:root[data-theme="dark"] {
+    --color-bg: #18150F;
+    --color-bg-soft: #201C16;
+    --color-surface: #322C25;
+    --color-sidebar: #201C16;
+    --color-border: #3D362C;
+    --color-border-strong: #4C4335;
+
+    --color-text: #F2E9DA;
+    --color-text-muted: #C7BBA6;
+    --color-text-faint: #8B806C;
+
+    --color-accent: #DD8055;
+    --color-accent-hover: #EA936B;
+    --color-accent-soft: #44291A;
+    --color-accent-soft-strong: #59341F;
+
+    --color-danger: #E2695A;
+    --color-danger-soft: #3B221E;
+    --color-success: #6EAF7C;
+
+    --color-user-bubble: #3A2C1F;
+    --color-assistant-bubble: #322C25;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
+    --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.32);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.44);
+
+    color-scheme: dark;
+}
+
 * {
     box-sizing: border-box;
 }
@@ -90,6 +128,10 @@ button {
 }
 
 /* --- shared brand mark ------------------------------------------------- */
+/* The brand-mark gradient (here and in .landing-preview-avatar.assistant
+   / .model-bar-fill below) is a fixed, always-vivid terracotta -- kept
+   hardcoded rather than theme-driven, same as a logo not changing with
+   dark mode, so it's intentionally not var(--color-*)-based. */
 
 .brand-mark {
     display: inline-flex;
@@ -383,6 +425,9 @@ button {
     margin: 0;
 }
 
+/* A deliberately always-dark accent band (self-contained dark
+   background + light text, both hardcoded), so it stays correct and
+   still "pops" against the page in either theme without changes here. */
 .landing-cta {
     max-width: 760px;
     margin: 96px auto 80px;
@@ -424,6 +469,16 @@ button {
     background:
         radial-gradient(circle at 15% 15%, #FBE9D6 0%, transparent 45%),
         radial-gradient(circle at 85% 85%, #F0DEC7 0%, transparent 50%),
+        var(--color-bg);
+}
+
+/* The two radial-gradient splashes above are hardcoded pale-cream tones
+   (not var(--color-*)), so they'd look like odd bright blotches on a
+   dark background -- swap them for a warm dark glow instead. */
+:root[data-theme="dark"] .login-page {
+    background:
+        radial-gradient(circle at 15% 15%, #3A2A1C 0%, transparent 45%),
+        radial-gradient(circle at 85% 85%, #2E2418 0%, transparent 50%),
         var(--color-bg);
 }
 
@@ -544,7 +599,17 @@ button {
     color: var(--color-danger);
 }
 
+.success-message {
+    font-size: 13.5px;
+    color: var(--color-success);
+}
+
 .login-error:empty {
+    display: none;
+}
+
+.error-message:empty,
+.success-message:empty {
     display: none;
 }
 
@@ -1053,6 +1118,13 @@ button {
     border-radius: 5px;
 }
 
+/* Code blocks stay a fixed dark "terminal" color in both themes, same
+   as ChatGPT/Claude, rather than flipping with the page -- so the
+   highlight.js atom-one-dark stylesheet (chat.html) needs no swap for
+   dark mode. --color-surface is deliberately a shade lighter than this
+   #2A2622 in the dark palette above, so a code block still reads as a
+   distinct "sunken" panel inside a dark assistant bubble instead of
+   blending into it. */
 .assistant-message pre {
     position: relative;
     margin: 0 0 12px;
@@ -1321,8 +1393,12 @@ button {
 }
 
 @keyframes pulse-recording {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(179, 64, 47, 0.35); }
-    50% { box-shadow: 0 0 0 6px rgba(179, 64, 47, 0); }
+    0%, 100% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-danger) 35%, transparent);
+    }
+    50% {
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-danger) 0%, transparent);
+    }
 }
 
 .message-action-button.speaking {
@@ -1667,6 +1743,53 @@ button {
     color: var(--color-text-muted);
     font-size: 14px;
     padding: 12px 0;
+}
+
+/* =========================================================================
+   ACCOUNT PAGE
+   ========================================================================= */
+
+.usage-panel .login-form {
+    max-width: 420px;
+}
+
+.account-meta {
+    font-size: 13px;
+    color: var(--color-text-faint);
+    margin: 4px 0 16px;
+}
+
+.plan-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    border-radius: var(--radius-pill);
+    background: var(--color-accent-soft);
+    color: var(--color-accent-hover);
+    font-size: 12.5px;
+    font-weight: 700;
+    text-transform: capitalize;
+}
+
+.plan-table-wrap {
+    overflow-x: auto;
+    margin: 16px 0 20px;
+}
+
+.plan-table th,
+.plan-table td {
+    text-align: center;
+}
+
+.plan-table th:first-child,
+.plan-table td:first-child {
+    text-align: left;
+}
+
+.plan-table-premium {
+    background: var(--color-accent-soft);
+    color: var(--color-accent-hover);
+    font-weight: 600;
 }
 
 /* =========================================================================

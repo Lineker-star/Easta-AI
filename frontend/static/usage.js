@@ -133,12 +133,43 @@ function renderUsageTable(logs) {
 }
 
 
+/* Reads the currently-active theme's resolved token values (light or
+ * dark — data-theme is already stamped on <html> before this script
+ * runs, by the inline snippet in <head>) so the chart's colors stay in
+ * sync with the CSS palette in styles.css without duplicating hex
+ * values here. */
+function themeColor(variableName) {
+    return getComputedStyle(document.documentElement)
+        .getPropertyValue(variableName)
+        .trim();
+}
+
+
+function hexToRgba(hex, alpha) {
+    const value = (hex || "").replace("#", "");
+
+    if (value.length !== 6) {
+        return `rgba(196, 105, 62, ${alpha})`; // fallback: light-mode accent
+    }
+
+    const r = parseInt(value.slice(0, 2), 16);
+    const g = parseInt(value.slice(2, 4), 16);
+    const b = parseInt(value.slice(4, 6), 16);
+
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+
 function renderSpendChart(byDay) {
     const canvas = document.getElementById("spend-chart");
 
     if (typeof Chart === "undefined") {
         return;
     }
+
+    const accentColor = themeColor("--color-accent");
+    const textColor = themeColor("--color-text-muted");
+    const gridColor = themeColor("--color-border");
 
     new Chart(canvas, {
         type: "line",
@@ -148,8 +179,8 @@ function renderSpendChart(byDay) {
                 {
                     label: "Daily spend (USD)",
                     data: byDay.map((row) => row.cost_usd),
-                    borderColor: "#C4693E",
-                    backgroundColor: "rgba(196, 105, 62, 0.15)",
+                    borderColor: accentColor,
+                    backgroundColor: hexToRgba(accentColor, 0.15),
                     tension: 0.3,
                     fill: true,
                     pointRadius: 2
@@ -163,11 +194,17 @@ function renderSpendChart(byDay) {
                 legend: { display: false }
             },
             scales: {
+                x: {
+                    ticks: { color: textColor },
+                    grid: { color: gridColor }
+                },
                 y: {
                     beginAtZero: true,
                     ticks: {
+                        color: textColor,
                         callback: (value) => `$${value}`
-                    }
+                    },
+                    grid: { color: gridColor }
                 }
             }
         }

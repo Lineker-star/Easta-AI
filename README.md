@@ -183,6 +183,44 @@ production traffic. Pick these up in Cursor:
     `usage_logs` yet (reconcile it against your OpenRouter invoice
     directly, or swap to a provider/endpoint that reports cost). STT
     and image generation costs *are* logged, same as chat calls.
+- **Dark / light mode** — every page (landing, login, register, chat,
+  `/usage`) follows the OS's `prefers-color-scheme` on first visit,
+  and a 🌙/☀️ toggle in the chat sidebar footer (next to Cost
+  dashboard) lets the user override it explicitly, persisted in
+  `localStorage`. The dark palette in `frontend/static/styles.css`
+  reuses every existing `--color-*` variable name under a
+  `:root[data-theme="dark"]` override — no component had to change to
+  pick it up. `frontend/templates/_theme_init.html` (included at the
+  top of every page's `<head>`, before the stylesheet) resolves and
+  stamps `data-theme` on `<html>` before first paint, so there's no
+  flash of the wrong theme. Two things that read colors outside CSS
+  needed explicit handling: the `/usage` page's Chart.js chart now
+  reads the active theme's resolved `--color-*` values via
+  `getComputedStyle` when building the chart (`themeColor()` /
+  `hexToRgba()` in `frontend/static/usage.js`); the syntax-highlighted
+  code blocks in chat deliberately *don't* flip with the theme (see
+  the comment above `.assistant-message pre` in `styles.css`) — they
+  stay a fixed dark "terminal" color in both themes, same as
+  ChatGPT/Claude, so highlight.js's `atom-one-dark` stylesheet needs
+  no swap.
+- **Account settings + subscription scaffolding** — a new **Account**
+  page (`/account`, linked from the chat sidebar footer next to Cost
+  dashboard) with a **Profile** section (username/email, "member
+  since", backed by `GET`/`PUT /api/account`), a **Password** section
+  (`PUT /api/account/password`, verifies the current password with
+  `check_password_hash` the same way login does before accepting a
+  new one), and a **Plan** section showing the account's plan
+  (`GET /api/account/plan`) next to a Free vs. Premium comparison
+  table with a disabled "Upgrade — Coming soon" button. A new
+  `users.plan` column (`database/schema.sql`, `DEFAULT 'free'`) backs
+  this. ⚠️ **Scaffolding, not enforcement**: nothing anywhere in the
+  app reads `plan` to gate or limit behavior — every account is fully
+  unrestricted regardless of its value, and the comparison table's
+  numbers (100 messages/day, 5 research searches/day, etc.) are
+  illustrative of a *future* tier structure once billing (Stripe or
+  similar) is wired up, not a real current limit — the page says so
+  explicitly next to the table so this isn't misleading in the
+  meantime.
 
 ## Run locally
 
@@ -595,6 +633,14 @@ application.
 - Let `EASTA_TTS_VOICE` vary by reply language instead of one fixed
   voice for every language server TTS is used for (`SpeakRequest`
   already accepts a `language` field for this, unused so far).
+- Wire up real billing (Stripe or similar) against the `users.plan`
+  scaffolding: a webhook to flip `plan` on checkout/cancellation, and
+  actual enforcement somewhere (e.g. `enforce_rate_limit()` or the
+  research/generation tool gates in `backend/app.py`) once there's a
+  real Free vs. Premium difference to enforce.
+- Add email verification and a password-reset flow — registration and
+  the new Account page both accept any email without confirming it's
+  reachable.
 
 ## Tech stack
 

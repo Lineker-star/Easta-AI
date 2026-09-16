@@ -3,6 +3,7 @@
     "logged_in_as": "Logged in as {username}",
     "new_chat": "+ New chat",
     "cost_dashboard": "📊 Cost dashboard",
+    "account_link": "⚙️ Account",
     "log_out": "Log out",
     "empty_title": "How can I help you today?",
     "empty_description": "Send a message to begin this conversation.",
@@ -15,5 +16,7 @@
     "research_toggle_title": "Research mode: multiple searches, full source reading, cited answer",
     "research_toggle_label": "Research",
     "canvas_toggle_label": "Canvas",
-    "mic_button_title": "Voice input"
+    "mic_button_title": "Voice input",
+    "theme_toggle_dark": "Dark mode",
+    "theme_toggle_light": "Light mode"
 }

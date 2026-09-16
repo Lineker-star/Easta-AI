@@ -3,6 +3,7 @@
     "logged_in_as": "Sesión iniciada como {username}",
     "new_chat": "+ Nuevo chat",
     "cost_dashboard": "📊 Panel de costos",
+    "account_link": "⚙️ Cuenta",
     "log_out": "Cerrar sesión",
     "empty_title": "¿En qué puedo ayudarte hoy?",
     "empty_description": "Envía un mensaje para comenzar esta conversación.",
@@ -15,5 +16,7 @@
     "research_toggle_title": "Modo investigación: múltiples búsquedas, lectura completa de las fuentes, respuesta con citas",
     "research_toggle_label": "Investigación",
     "canvas_toggle_label": "Lienzo",
-    "mic_button_title": "Entrada de voz"
+    "mic_button_title": "Entrada de voz",
+    "theme_toggle_dark": "Modo oscuro",
+    "theme_toggle_light": "Modo claro"
 }

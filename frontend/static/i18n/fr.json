@@ -3,6 +3,7 @@
     "logged_in_as": "Connecté en tant que {username}",
     "new_chat": "+ Nouvelle discussion",
     "cost_dashboard": "📊 Tableau de bord des coûts",
+    "account_link": "⚙️ Compte",
     "log_out": "Déconnexion",
     "empty_title": "Comment puis-je vous aider aujourd'hui ?",
     "empty_description": "Envoyez un message pour démarrer cette conversation.",
@@ -15,5 +16,7 @@
     "research_toggle_title": "Mode recherche : recherches multiples, lecture complète des sources, réponse avec citations",
     "research_toggle_label": "Recherche",
     "canvas_toggle_label": "Canevas",
-    "mic_button_title": "Saisie vocale"
+    "mic_button_title": "Saisie vocale",
+    "theme_toggle_dark": "Mode sombre",
+    "theme_toggle_light": "Mode clair"
 }

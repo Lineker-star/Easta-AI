@@ -25,6 +25,9 @@ const canvasDownloadLink = document.getElementById("canvas-download-link");
 const canvasCloseButton = document.getElementById("canvas-close-button");
 const canvasBody = document.getElementById("canvas-body");
 const micButton = document.getElementById("mic-button");
+const themeToggleButton = document.getElementById("theme-toggle-button");
+const themeToggleIcon = document.getElementById("theme-toggle-icon");
+const themeToggleLabel = document.getElementById("theme-toggle-label");
 
 let activeConversationId = window.INITIAL_CONVERSATION_ID;
 let currentCanvas = null;
@@ -94,6 +97,49 @@ researchToggle.addEventListener("click", () => {
         // Not persisted this session, but the in-memory toggle still works.
     }
 });
+
+
+/* --- dark / light theme ----------------------------------------------
+ * The actual theme choice (localStorage "easta_theme" vs. OS
+ * prefers-color-scheme) is already resolved and stamped as
+ * data-theme on <html> before first paint by the inline snippet in
+ * frontend/templates/_theme_init.html — this just wires up the
+ * sidebar toggle to flip it and keeps the toggle's own icon/label in
+ * sync with both the current theme and the current UI language. */
+
+function getCurrentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "dark"
+        ? "dark"
+        : "light";
+}
+
+
+function applyThemeToggleUI() {
+    const theme = getCurrentTheme();
+    themeToggleIcon.textContent = theme === "dark" ? "☀️" : "🌙";
+    themeToggleLabel.textContent = theme === "dark"
+        ? t("theme_toggle_light")
+        : t("theme_toggle_dark");
+}
+
+
+function setTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+
+    try {
+        window.localStorage.setItem("easta_theme", theme);
+    } catch {
+        // Not persisted this session, but the in-memory toggle still works.
+    }
+
+    applyThemeToggleUI();
+}
+
+
+themeToggleButton.addEventListener("click", () => {
+    setTheme(getCurrentTheme() === "dark" ? "light" : "dark");
+});
+
 
 if (window.marked) {
     window.marked.setOptions({ breaks: true, gfm: true });
@@ -1728,6 +1774,7 @@ languageSelect.addEventListener("change", async () => {
 
     await loadTranslations(languagePreference);
     applyStaticTranslations();
+    applyThemeToggleUI();
 
     if (!messagesContainer.querySelector(".message-row")) {
         showEmptyState();
@@ -1765,6 +1812,7 @@ async function bootstrap() {
 
     await loadTranslations(languagePreference);
     applyStaticTranslations();
+    applyThemeToggleUI();
 
     await loadFeatures();
     researchToggle.hidden = !serverFeatures.research_mode;

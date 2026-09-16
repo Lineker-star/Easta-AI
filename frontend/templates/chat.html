@@ -10,6 +10,8 @@
 
     <title>EASTA</title>
 
+    {% include "_theme_init.html" %}
+
     <link
         rel="stylesheet"
         href="{{ url_for('static', filename='styles.css') }}"
@@ -86,6 +88,23 @@
                 >
                     📊 Cost dashboard
                 </a>
+
+                <a
+                    href="{{ url_for('account') }}"
+                    class="sidebar-footer-link"
+                    data-i18n="account_link"
+                >
+                    ⚙️ Account
+                </a>
+
+                <button
+                    type="button"
+                    class="sidebar-footer-link"
+                    id="theme-toggle-button"
+                >
+                    <span id="theme-toggle-icon" aria-hidden="true">🌙</span>
+                    <span id="theme-toggle-label">Dark mode</span>
+                </button>
             </div>
 
         </aside>

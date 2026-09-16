@@ -18,8 +18,17 @@ CREATE TABLE IF NOT EXISTS public.users (
     username character varying(50) NOT NULL UNIQUE,
     email character varying(255) NOT NULL UNIQUE,
     password_hash text NOT NULL,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    -- Scaffolding for a future Stripe (or similar) integration -- see
+    -- the Account page / GET /api/account/plan in backend/app.py.
+    -- Nothing reads this to gate or limit behavior yet; every account
+    -- is effectively unrestricted regardless of this value.
+    plan character varying(20) NOT NULL DEFAULT 'free',
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT users_plan_check CHECK (((plan)::text = ANY ((ARRAY['free'::character varying, 'premium'::character varying])::text[])))
 );
+
+-- Safe to re-run against a database created before this column existed.
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS plan character varying(20) NOT NULL DEFAULT 'free';
 
 --
 -- conversations

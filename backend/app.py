@@ -245,6 +245,17 @@ class RegisterRequest(BaseModel):
     confirm_password: str
 
 
+class AccountUpdateRequest(BaseModel):
+    username: str
+    email: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_new_password: str
+
+
 class ImageAttachment(BaseModel):
     name: str | None = None
     mime_type: str
@@ -397,6 +408,62 @@ def create_user(
                 "That username or email is already registered."
             ),
         ) from error
+
+
+def get_user_by_id(user_id: int):
+    """Returns (id, username, email, password_hash, created_at, plan)
+    for the Account page -- unlike get_user_by_username()/
+    get_user_by_email() (used only for login/uniqueness checks), this
+    includes everything the profile/plan sections need in one query."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, username, email, password_hash, created_at, plan
+                FROM users
+                WHERE id = %s;
+                """,
+                (user_id,),
+            )
+
+            return cursor.fetchone()
+
+
+def update_user_profile(user_id: int, username: str, email: str):
+    """Returns (id, username, email, created_at, plan)."""
+    try:
+        with psycopg.connect(DATABASE_URL) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET username = %s, email = %s
+                    WHERE id = %s
+                    RETURNING id, username, email, created_at, plan;
+                    """,
+                    (username, email, user_id),
+                )
+
+                return cursor.fetchone()
+
+    except UniqueViolation as error:
+        raise HTTPException(
+            status_code=409,
+            detail="That username or email is already taken.",
+        ) from error
+
+
+def update_user_password(user_id: int, password_hash: str):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE users
+                SET password_hash = %s
+                WHERE id = %s;
+                """,
+                (password_hash, user_id),
+            )
 
 
 # --- Conversation / message helpers -----------------------------------------
@@ -2757,6 +2824,139 @@ def logout(request: Request):
     request.session.clear()
 
     return {"message": "Logout successful."}
+
+
+# --- Routes: account ---------------------------------------------------
+# Profile (username/email/password) and plan info for the Account page.
+# The `plan` column is scaffolding for a future Stripe (or similar)
+# integration -- GET /api/account/plan just reports it, nothing here (or
+# anywhere else in the app) gates behavior on it yet.
+
+@app.get("/api/account")
+def get_account(request: Request):
+    user_id = require_user(request)
+
+    user = get_user_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Account not found.",
+        )
+
+    _id, username, email, _password_hash, created_at, plan = user
+
+    return {
+        "id": user_id,
+        "username": username,
+        "email": email,
+        "created_at": serialize_datetime(created_at),
+        "plan": plan,
+    }
+
+
+@app.put("/api/account")
+def update_account(
+    data: AccountUpdateRequest,
+    request: Request,
+):
+    user_id = require_user(request)
+
+    username = data.username.strip()
+    email = data.email.strip().lower()
+
+    if not username:
+        raise HTTPException(
+            status_code=400,
+            detail="Username is required.",
+        )
+
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="Email is required.",
+        )
+
+    existing_username = get_user_by_username(username)
+    if existing_username and existing_username[0] != user_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Username already taken.",
+        )
+
+    existing_email = get_user_by_email(email)
+    if existing_email and existing_email[0] != user_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Email already taken.",
+        )
+
+    updated = update_user_profile(user_id, username, email)
+
+    # Keep the session's cached username (used for "Logged in as ...")
+    # in sync without requiring a fresh login.
+    request.session["username"] = updated[1]
+
+    return {
+        "message": "Profile updated.",
+        "user": {
+            "id": updated[0],
+            "username": updated[1],
+            "email": updated[2],
+            "created_at": serialize_datetime(updated[3]),
+            "plan": updated[4],
+        },
+    }
+
+
+@app.put("/api/account/password")
+def change_password(
+    data: PasswordChangeRequest,
+    request: Request,
+):
+    user_id = require_user(request)
+
+    if not data.current_password or not data.new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="All password fields are required.",
+        )
+
+    if data.new_password != data.confirm_new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="New passwords do not match.",
+        )
+
+    user = get_user_by_id(user_id)
+
+    if not user or not check_password_hash(
+        user[3],
+        data.current_password,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Current password is incorrect.",
+        )
+
+    update_user_password(user_id, generate_password_hash(data.new_password))
+
+    return {"message": "Password changed."}
+
+
+@app.get("/api/account/plan")
+def get_account_plan(request: Request):
+    user_id = require_user(request)
+
+    user = get_user_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Account not found.",
+        )
+
+    return {"plan": user[5]}
 
 
 # --- Routes: conversations -------------------------------------------------

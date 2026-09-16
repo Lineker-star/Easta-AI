@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Account — EASTA</title>
+
+    {% include "_theme_init.html" %}
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+</head>
+
+<body class="usage-page">
+
+    <div class="usage-shell">
+
+        <div class="usage-header">
+            <div class="brand-row">
+                <span class="brand-mark">E</span>
+                <div>
+                    <h1>Account</h1>
+                </div>
+            </div>
+
+            <a href="{{ url_for('chat') }}" class="btn btn-secondary">
+                &larr; Back to chat
+            </a>
+        </div>
+
+        <div class="usage-panel">
+            <h2>Profile</h2>
+
+            <p id="profile-error" class="error-message"></p>
+            <p id="profile-success" class="success-message"></p>
+
+            <form id="profile-form" class="login-form">
+
+                <div class="login-field">
+                    <label for="account-username">Username</label>
+                    <input
+                        type="text"
+                        id="account-username"
+                        name="username"
+                        maxlength="50"
+                        required
+                    >
+                </div>
+
+                <div class="login-field">
+                    <label for="account-email">Email</label>
+                    <input
+                        type="email"
+                        id="account-email"
+                        name="email"
+                        required
+                    >
+                </div>
+
+                <p class="account-meta">
+                    Member since <span id="account-member-since">—</span>
+                </p>
+
+                <button type="submit" class="btn btn-primary">
+                    Update profile
+                </button>
+
+            </form>
+        </div>
+
+        <div class="usage-panel">
+            <h2>Password</h2>
+
+            <p id="password-error" class="error-message"></p>
+            <p id="password-success" class="success-message"></p>
+
+            <form id="password-form" class="login-form">
+
+                <div class="login-field">
+                    <label for="current-password">Current password</label>
+                    <input
+                        type="password"
+                        id="current-password"
+                        name="current_password"
+                        required
+                    >
+                </div>
+
+                <div class="login-field">
+                    <label for="new-password">New password</label>
+                    <input
+                        type="password"
+                        id="new-password"
+                        name="new_password"
+                        required
+                    >
+                </div>
+
+                <div class="login-field">
+                    <label for="confirm-new-password">Confirm new password</label>
+                    <input
+                        type="password"
+                        id="confirm-new-password"
+                        name="confirm_new_password"
+                        required
+                    >
+                </div>
+
+                <button type="submit" class="btn btn-primary">
+                    Change password
+                </button>
+
+            </form>
+        </div>
+
+        <div class="usage-panel">
+            <h2>Plan</h2>
+
+            <p>
+                Current plan:
+                <span class="plan-badge" id="current-plan-badge">Free</span>
+            </p>
+
+            <p class="account-meta">
+                Every account currently has full, unrestricted access
+                while billing is still in development — nothing below
+                is enforced yet.
+            </p>
+
+            <div class="plan-table-wrap">
+                <table class="usage-table plan-table">
+                    <thead>
+                        <tr>
+                            <th>Feature</th>
+                            <th>Free</th>
+                            <th>Premium</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Messages / day</td>
+                            <td>100</td>
+                            <td class="plan-table-premium">Unlimited</td>
+                        </tr>
+                        <tr>
+                            <td>Research mode</td>
+                            <td>5 / day</td>
+                            <td class="plan-table-premium">Unlimited</td>
+                        </tr>
+                        <tr>
+                            <td>Document &amp; image generation</td>
+                            <td>10 / month</td>
+                            <td class="plan-table-premium">Unlimited</td>
+                        </tr>
+                        <tr>
+                            <td>API access</td>
+                            <td>—</td>
+                            <td class="plan-table-premium">✓</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <button
+                type="button"
+                class="btn btn-primary"
+                id="upgrade-button"
+                disabled
+                title="Billing isn't set up yet."
+            >
+                Upgrade to Premium — Coming soon
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+    </script>
+
+    <script src="{{ url_for('static', filename='account.js') }}"></script>
+
+</body>
+</html>
