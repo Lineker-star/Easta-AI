@@ -239,6 +239,8 @@ button {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
     max-width: 1120px;
     margin: 0 auto;
     padding: 22px 24px;
@@ -1434,6 +1436,21 @@ button {
     display: flex;
     align-items: flex-end;
     gap: 8px;
+    position: relative;
+}
+
+.composer-extra-controls {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+/* Compound selector (not just .composer-more-button) so this reliably
+   beats .composer-icon-button's own `display: flex` regardless of
+   which rule happens to come later in the stylesheet -- same class of
+   bug as the [hidden]-vs-own-display issue elsewhere in this file. */
+.composer-icon-button.composer-more-button {
+    display: none;
 }
 
 .message-form textarea {
@@ -1832,6 +1849,15 @@ button {
     font-variant-numeric: tabular-nums;
 }
 
+/* Wrap any .usage-table in <div class="table-scroll"> so it scrolls
+   horizontally on narrow screens instead of overflowing the page or
+   squeezing columns illegible -- same fix already used for
+   .plan-table-wrap, generalized for reuse (usage log, API keys,
+   transcription job/item lists). */
+.table-scroll {
+    overflow-x: auto;
+}
+
 .usage-table {
     width: 100%;
     border-collapse: collapse;
@@ -1966,6 +1992,7 @@ button {
 
 .job-download-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     margin: 12px 0 16px;
 }
@@ -2003,6 +2030,10 @@ button {
 }
 
 @media (max-width: 700px) {
+    .stat-grid {
+        grid-template-columns: 1fr;
+    }
+
     .sidebar {
         position: fixed;
         z-index: 20;
@@ -2051,5 +2082,37 @@ button {
         width: 100%;
         box-shadow: var(--shadow-lg);
         border-left: none;
+    }
+}
+
+/* The composer's icon row (attach, research, image style, mic) can
+   outgrow a phone-width screen once every optional control is
+   visible at once -- collapse them into a "More options" popover
+   here instead of shrinking icons illegibly. Comfortably fits inline
+   again by ~560px (a small tablet in portrait already has room). */
+@media (max-width: 560px) {
+    /* Matches the compound selector's specificity above so this
+       override actually wins at this breakpoint. */
+    .composer-icon-button.composer-more-button {
+        display: flex;
+    }
+
+    .composer-extra-controls {
+        display: none;
+        position: absolute;
+        bottom: calc(100% + 8px);
+        left: 0;
+        flex-wrap: wrap;
+        max-width: calc(100vw - 64px);
+        padding: 10px;
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        border: 1px solid var(--color-border-strong);
+        box-shadow: var(--shadow-md);
+        z-index: 5;
+    }
+
+    .composer-extra-controls.open {
+        display: flex;
     }
 }

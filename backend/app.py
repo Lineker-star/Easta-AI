@@ -1898,16 +1898,20 @@ def transcribe_audio_bytes(data: bytes, audio_format: str) -> tuple[str, float]:
     return text, cost_usd
 
 
-def synthesize_speech_bytes(text: str) -> bytes:
-    """POSTs text to OpenRouter's speech endpoint and returns raw MP3
-    bytes. Raises on failure.
-    NOTE: unlike the transcription/image APIs, this endpoint's response
-    is raw audio, not JSON -- OpenRouter doesn't document a header with
-    the per-call dollar cost for it, so (unlike every other generation
-    call in this file) this one is NOT logged to usage_logs. Reconcile
-    TTS spend against your OpenRouter invoice directly, or switch to a
-    provider/endpoint that reports cost before relying on the /usage
-    dashboard to include it."""
+# Unlike the transcription/image APIs, the speech endpoint's response
+# is raw audio, not JSON -- OpenRouter doesn't return a per-call dollar
+# cost for it the way it does elsewhere. Every other paid call in this
+# file logs a real returned cost; TTS instead uses a flat per-character
+# estimate (OpenAI's tts-1 list price, ~$15/1M characters, as a
+# reasonable reference point) so it still shows up in usage_logs rather
+# than going uncounted. Reconcile against your OpenRouter invoice
+# periodically, same as the token-based pricing table.
+TTS_FALLBACK_COST_USD_PER_1K_CHARS = 0.015
+
+
+def synthesize_speech_bytes(text: str) -> tuple[bytes, float]:
+    """POSTs text to OpenRouter's speech endpoint. Returns (audio_mp3,
+    estimated_cost_usd). Raises on failure."""
     response = requests.post(
         "https://openrouter.ai/api/v1/audio/speech",
         headers={
@@ -1924,7 +1928,9 @@ def synthesize_speech_bytes(text: str) -> bytes:
     )
     response.raise_for_status()
 
-    return response.content
+    cost_usd = (len(text) / 1000) * TTS_FALLBACK_COST_USD_PER_1K_CHARS
+
+    return response.content, cost_usd
 
 
 GENERATION_TOOLS = [
@@ -4432,12 +4438,17 @@ def speak(data: SpeakRequest, request: Request):
     text = text[:MAX_TTS_CHARS]
 
     try:
-        audio_bytes = synthesize_speech_bytes(text)
+        audio_bytes, cost_usd = synthesize_speech_bytes(text)
     except Exception as error:
         raise HTTPException(
             status_code=502,
             detail=f"Voice synthesis failed: {error}",
         ) from error
+
+    try:
+        log_direct_cost(user_id, None, TTS_MODEL, cost_usd)
+    except Exception as error:  # noqa: BLE001 - best-effort
+        print(f"EASTA: TTS cost logging failed: {error!r}")
 
     return Response(
         content=audio_bytes,

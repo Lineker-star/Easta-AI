@@ -106,7 +106,9 @@ uploadForm.addEventListener("submit", async (event) => {
         return;
     }
 
+    const originalLabel = startJobButton.textContent;
     startJobButton.disabled = true;
+    startJobButton.textContent = "Uploading…";
 
     try {
         const formData = new FormData();
@@ -138,6 +140,7 @@ uploadForm.addEventListener("submit", async (event) => {
 
     } finally {
         startJobButton.disabled = false;
+        startJobButton.textContent = originalLabel;
     }
 });
 
@@ -315,7 +318,11 @@ async function refreshJobList() {
         });
 
         table.appendChild(tbody);
-        jobList.appendChild(table);
+
+        const scrollWrap = document.createElement("div");
+        scrollWrap.className = "table-scroll";
+        scrollWrap.appendChild(table);
+        jobList.appendChild(scrollWrap);
 
     } catch (error) {
         console.error(error);

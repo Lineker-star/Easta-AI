@@ -76,18 +76,20 @@
         <div class="usage-panel">
             <h2>Recent calls</h2>
 
-            <table class="usage-table" id="usage-table">
-                <thead>
-                    <tr>
-                        <th>Model</th>
-                        <th>Prompt tokens</th>
-                        <th>Completion tokens</th>
-                        <th>Cost</th>
-                        <th>When</th>
-                    </tr>
-                </thead>
-                <tbody id="usage-table-body"></tbody>
-            </table>
+            <div class="table-scroll">
+                <table class="usage-table" id="usage-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Prompt tokens</th>
+                            <th>Completion tokens</th>
+                            <th>Cost</th>
+                            <th>When</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usage-table-body"></tbody>
+                </table>
+            </div>
         </div>
 
         <p style="color: var(--color-text-faint); font-size: 12.5px;">

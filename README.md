@@ -178,11 +178,16 @@ production traffic. Pick these up in Cursor:
     **Research** toggle (`GET /api/features` → `research_mode`).
   - ⚠️ **Prototype-grade**: `POST /api/speak` returns raw audio, and
     OpenRouter doesn't expose a per-call dollar cost for it the way
-    the transcription/image endpoints do — so, unlike every other
-    generation call in this app, server TTS spend is **not** logged to
-    `usage_logs` yet (reconcile it against your OpenRouter invoice
-    directly, or swap to a provider/endpoint that reports cost). STT
-    and image generation costs *are* logged, same as chat calls.
+    the transcription/image endpoints do — so it's logged to
+    `usage_logs` from a flat per-character estimate
+    (`TTS_FALLBACK_COST_USD_PER_1K_CHARS`, OpenAI's tts-1 list price
+    as a reference point) rather than a real returned cost like every
+    other generation call in this app. Every paid call — chat, STT,
+    TTS, image generation, and bulk transcription — now logs
+    *something* to `usage_logs` rather than going uncounted; this one
+    just isn't as precise as the rest. Swap to a provider/endpoint
+    that reports real cost, or reconcile against your OpenRouter
+    invoice, if you need exact TTS numbers.
 - **Dark / light mode** — every page (landing, login, register, chat,
   `/usage`) follows the OS's `prefers-color-scheme` on first visit,
   and a 🌙/☀️ toggle in the chat sidebar footer (next to Cost
@@ -799,12 +804,13 @@ application.
 - Extend `render_markdown_to_pdf()` / `render_markdown_to_docx()` to
   cover tables, images, and nested lists (or swap in a proper
   Markdown->HTML parser + `xhtml2pdf` for fuller CommonMark coverage).
-- Log server TTS spend to `usage_logs` once you confirm how OpenRouter
-  reports per-call cost for `POST /api/v1/audio/speech` (it returns
-  raw audio, not JSON with a `usage.cost` field like the
-  transcription/image endpoints already logged via `log_direct_cost()`
-  do) — see `synthesize_speech_bytes()`'s docstring in
-  `backend/app.py`.
+- Replace TTS's flat per-character cost estimate
+  (`TTS_FALLBACK_COST_USD_PER_1K_CHARS`) with a real per-call cost
+  once you confirm how OpenRouter reports one for
+  `POST /api/v1/audio/speech` (it returns raw audio, not JSON with a
+  `usage.cost` field like the transcription/image endpoints already
+  logged via `log_direct_cost()`) — see `synthesize_speech_bytes()`'s
+  docstring in `backend/app.py`.
 - Let `EASTA_TTS_VOICE` vary by reply language instead of one fixed
   voice for every language server TTS is used for (`SpeakRequest`
   already accepts a `language` field for this, unused so far).

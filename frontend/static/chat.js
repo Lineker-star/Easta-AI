@@ -11,6 +11,8 @@ const logoutButton = document.getElementById("logout-button");
 const sidebar = document.getElementById("sidebar");
 const openButton = document.getElementById("sidebar-toggle");
 const closeButton = document.getElementById("sidebar-close");
+const composerMoreButton = document.getElementById("composer-more-button");
+const composerExtraControls = document.getElementById("composer-extra-controls");
 const attachButton = document.getElementById("attach-button");
 const fileInput = document.getElementById("file-input");
 const attachmentRow = document.getElementById("attachment-row");
@@ -122,6 +124,53 @@ imageStyleSelect.addEventListener("change", () => {
         window.localStorage.setItem("easta_image_aspect_ratio", imageAspectRatio);
     } catch {
         // Not persisted this session, but the in-memory value still applies.
+    }
+});
+
+
+/* Composer "more options" popover (narrow screens only -- see the
+ * @media (max-width: 560px) rule in styles.css). Attach/research/
+ * image-style/mic keep their existing ids and listeners wherever this
+ * moves them in the layout, so no other behavior changes. */
+
+function closeComposerExtraControls() {
+    composerExtraControls.classList.remove("open");
+    composerMoreButton.setAttribute("aria-expanded", "false");
+}
+
+
+composerMoreButton.addEventListener("click", () => {
+    const isOpen = composerExtraControls.classList.toggle("open");
+    composerMoreButton.setAttribute("aria-expanded", String(isOpen));
+});
+
+
+composerExtraControls.addEventListener("click", (event) => {
+    if (event.target.closest("button")) {
+        closeComposerExtraControls();
+    }
+});
+
+
+composerExtraControls.addEventListener("change", () => {
+    closeComposerExtraControls();
+});
+
+
+document.addEventListener("click", (event) => {
+    if (
+        composerExtraControls.classList.contains("open") &&
+        !composerExtraControls.contains(event.target) &&
+        event.target !== composerMoreButton
+    ) {
+        closeComposerExtraControls();
+    }
+});
+
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && composerExtraControls.classList.contains("open")) {
+        closeComposerExtraControls();
     }
 });
 

@@ -90,7 +90,9 @@ profileForm.addEventListener("submit", async (event) => {
     profileSuccess.textContent = "";
 
     const submitButton = profileForm.querySelector('button[type="submit"]');
+    const originalLabel = submitButton.textContent;
     submitButton.disabled = true;
+    submitButton.textContent = "Saving…";
 
     try {
         const response = await apiRequest("/api/account", {
@@ -114,6 +116,7 @@ profileForm.addEventListener("submit", async (event) => {
 
     } finally {
         submitButton.disabled = false;
+        submitButton.textContent = originalLabel;
     }
 });
 
@@ -125,7 +128,9 @@ passwordForm.addEventListener("submit", async (event) => {
     passwordSuccess.textContent = "";
 
     const submitButton = passwordForm.querySelector('button[type="submit"]');
+    const originalLabel = submitButton.textContent;
     submitButton.disabled = true;
+    submitButton.textContent = "Saving…";
 
     try {
         const response = await apiRequest("/api/account/password", {
@@ -148,6 +153,7 @@ passwordForm.addEventListener("submit", async (event) => {
 
     } finally {
         submitButton.disabled = false;
+        submitButton.textContent = originalLabel;
     }
 });
 
@@ -222,7 +228,11 @@ function renderApiKeys(keys) {
     });
 
     table.appendChild(tbody);
-    apiKeysList.appendChild(table);
+
+    const scrollWrap = document.createElement("div");
+    scrollWrap.className = "table-scroll";
+    scrollWrap.appendChild(table);
+    apiKeysList.appendChild(scrollWrap);
 }
 
 
@@ -259,7 +269,9 @@ newApiKeyForm.addEventListener("submit", async (event) => {
     newApiKeyReveal.hidden = true;
 
     const submitButton = newApiKeyForm.querySelector('button[type="submit"]');
+    const originalLabel = submitButton.textContent;
     submitButton.disabled = true;
+    submitButton.textContent = "Generating…";
 
     try {
         const response = await apiRequest("/api/account/api-keys", {
@@ -281,6 +293,7 @@ newApiKeyForm.addEventListener("submit", async (event) => {
 
     } finally {
         submitButton.disabled = false;
+        submitButton.textContent = originalLabel;
     }
 });
 
