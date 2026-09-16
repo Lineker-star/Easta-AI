@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Cost dashboard — EASTA</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+</head>
+
+<body class="usage-page">
+
+    <div class="usage-shell">
+
+        <div class="usage-header">
+            <div class="brand-row">
+                <span class="brand-mark">E</span>
+                <div>
+                    <h1>Cost dashboard</h1>
+                </div>
+            </div>
+
+            <a href="{{ url_for('chat') }}" class="btn btn-secondary">
+                &larr; Back to chat
+            </a>
+        </div>
+
+        <div class="stat-grid" id="stat-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total spend</div>
+                <div class="stat-value" id="stat-total-cost">—</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Total calls</div>
+                <div class="stat-value" id="stat-total-calls">—</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Prompt tokens</div>
+                <div class="stat-value" id="stat-prompt-tokens">—</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Completion tokens</div>
+                <div class="stat-value" id="stat-completion-tokens">—</div>
+            </div>
+        </div>
+
+        <div class="usage-panel">
+            <h2>Spend, last 30 days</h2>
+
+            <div class="chart-wrap">
+                <canvas id="spend-chart"></canvas>
+            </div>
+        </div>
+
+        <div class="usage-panel">
+            <h2>By model</h2>
+            <div id="model-breakdown"></div>
+        </div>
+
+        <div class="usage-panel">
+            <h2>Recent calls</h2>
+
+            <table class="usage-table" id="usage-table">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Prompt tokens</th>
+                        <th>Completion tokens</th>
+                        <th>Cost</th>
+                        <th>When</th>
+                    </tr>
+                </thead>
+                <tbody id="usage-table-body"></tbody>
+            </table>
+        </div>
+
+        <p style="color: var(--color-text-faint); font-size: 12.5px;">
+            Costs are estimated from an approximate per-model pricing
+            table and may not exactly match your OpenRouter invoice.
+        </p>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+    </script>
+
+    <script src="{{ url_for('static', filename='usage.js') }}"></script>
+
+</body>
+</html>

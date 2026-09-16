@@ -1,0 +1,19 @@
+{
+    "checking_session": "Checking your session...",
+    "logged_in_as": "Logged in as {username}",
+    "new_chat": "+ New chat",
+    "cost_dashboard": "📊 Cost dashboard",
+    "log_out": "Log out",
+    "empty_title": "How can I help you today?",
+    "empty_description": "Send a message to begin this conversation.",
+    "composer_placeholder": "Message EASTA...",
+    "composer_hint": "EASTA can use web search and code execution when it helps, and accepts images, PDFs, and DOCX files — double-check anything important.",
+    "attach_file_title": "Attach a file",
+    "send_message_aria": "Send message",
+    "thinking": "Thinking…",
+    "reply_language_label": "Reply language",
+    "research_toggle_title": "Research mode: multiple searches, full source reading, cited answer",
+    "research_toggle_label": "Research",
+    "canvas_toggle_label": "Canvas",
+    "mic_button_title": "Voice input"
+}

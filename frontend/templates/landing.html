@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>EASTA — Your AI assistant, built for Africa</title>
+
+    <meta
+        name="description"
+        content="EASTA is an AI assistant with web search, code
+        execution, and grounded answers from your own documents."
+    >
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+</head>
+
+<body>
+
+    <nav class="landing-nav">
+
+        <div class="brand-row">
+            <span class="brand-mark">E</span>
+            <span class="brand-name">EASTA</span>
+        </div>
+
+        <div class="landing-nav-actions">
+            <a href="{{ url_for('login_page') }}" class="btn btn-ghost">
+                Log in
+            </a>
+
+            <a href="{{ url_for('register') }}" class="btn btn-primary">
+                Get started
+            </a>
+        </div>
+
+    </nav>
+
+    <header class="landing-hero">
+
+        <span class="landing-eyebrow">
+            Now with tools, RAG &amp; live web search
+        </span>
+
+        <h1>
+            An AI assistant that <em>thinks with you</em>
+        </h1>
+
+        <p class="lede">
+            EASTA pairs a fast, well-rounded model with real tools —
+            web search, code execution, and grounding in your own
+            documents — so you get answers you can actually act on.
+        </p>
+
+        <div class="landing-hero-actions">
+            <a href="{{ url_for('register') }}" class="btn btn-primary">
+                Start chatting free
+            </a>
+
+            <a href="{{ url_for('login_page') }}" class="btn btn-secondary">
+                I already have an account
+            </a>
+        </div>
+
+    </header>
+
+    <div class="landing-preview">
+        <div class="landing-preview-card">
+
+            <div class="landing-preview-bar">
+                <span></span><span></span><span></span>
+            </div>
+
+            <div class="landing-preview-row user">
+                <div class="landing-preview-avatar"></div>
+                <div class="landing-preview-bubble">
+                    What changed in the latest CFA franc exchange rate
+                    this week, and what does that mean for a 500,000
+                    XAF import order?
+                </div>
+            </div>
+
+            <div class="landing-preview-row">
+                <div class="landing-preview-avatar assistant"></div>
+                <div class="landing-preview-bubble">
+                    🔍 Searched the web for &ldquo;CFA franc exchange
+                    rate this week&rdquo;<br><br>
+                    Here's the latest rate and what it means for your
+                    order, broken down step by step...
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <section class="landing-features">
+
+        <div class="landing-section-heading">
+            <h2>Built to actually get things done</h2>
+            <p>
+                Every conversation can reach further than the model's
+                own memory — out to the live web, into a sandbox, and
+                into the documents you give it.
+            </p>
+        </div>
+
+        <div class="feature-grid">
+
+            <div class="feature-card">
+                <div class="feature-icon">🔍</div>
+                <h3>Live web search</h3>
+                <p>
+                    EASTA can search the web mid-answer for current
+                    events, prices, and facts that change, then cite
+                    what it found.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">⚙️</div>
+                <h3>Code execution</h3>
+                <p>
+                    For exact math or data processing, EASTA can run
+                    a short Python snippet in a sandbox and use the
+                    result in its answer.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">📚</div>
+                <h3>Grounded in your data</h3>
+                <p>
+                    Add your own notes or documents and EASTA will
+                    prefer them over guesswork — with a clear signal
+                    when something isn't covered.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🧵</div>
+                <h3>Long-conversation memory</h3>
+                <p>
+                    Older turns are quietly summarized in the
+                    background, so long conversations stay coherent
+                    without ballooning cost.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">📎</div>
+                <h3>Attach &amp; discuss files</h3>
+                <p>
+                    Drop in a text file, log, or snippet and ask
+                    EASTA to read it, summarize it, or work through
+                    it with you.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">📊</div>
+                <h3>Transparent cost dashboard</h3>
+                <p>
+                    See exactly which model answered each message and
+                    what it cost, broken down by day and by model.
+                </p>
+            </div>
+
+        </div>
+
+    </section>
+
+    <section class="landing-cta">
+        <h2>Ready to try EASTA?</h2>
+        <p>Free to start. No credit card required.</p>
+
+        <a href="{{ url_for('register') }}" class="btn btn-primary">
+            Create your account
+        </a>
+    </section>
+
+    <footer class="landing-footer">
+        EASTA — built for Africa.
+    </footer>
+
+</body>
+</html>

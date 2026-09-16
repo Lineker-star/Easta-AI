@@ -1,0 +1,19 @@
+{
+    "checking_session": "Verificando tu sesión...",
+    "logged_in_as": "Sesión iniciada como {username}",
+    "new_chat": "+ Nuevo chat",
+    "cost_dashboard": "📊 Panel de costos",
+    "log_out": "Cerrar sesión",
+    "empty_title": "¿En qué puedo ayudarte hoy?",
+    "empty_description": "Envía un mensaje para comenzar esta conversación.",
+    "composer_placeholder": "Mensaje a EASTA...",
+    "composer_hint": "EASTA puede buscar en la web y ejecutar código cuando resulta útil, y acepta imágenes, PDF y archivos DOCX — verifica siempre la información importante.",
+    "attach_file_title": "Adjuntar un archivo",
+    "send_message_aria": "Enviar mensaje",
+    "thinking": "Pensando…",
+    "reply_language_label": "Idioma de respuesta",
+    "research_toggle_title": "Modo investigación: múltiples búsquedas, lectura completa de las fuentes, respuesta con citas",
+    "research_toggle_label": "Investigación",
+    "canvas_toggle_label": "Lienzo",
+    "mic_button_title": "Entrada de voz"
+}

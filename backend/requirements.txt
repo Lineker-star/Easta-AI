@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+itsdangerous
+psycopg[binary]
+openai
+Werkzeug
+requests
+beautifulsoup4
+gunicorn
+pypdf
+python-docx
+python-multipart
+reportlab

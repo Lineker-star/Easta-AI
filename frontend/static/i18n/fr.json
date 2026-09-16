@@ -1,0 +1,19 @@
+{
+    "checking_session": "Vérification de votre session...",
+    "logged_in_as": "Connecté en tant que {username}",
+    "new_chat": "+ Nouvelle discussion",
+    "cost_dashboard": "📊 Tableau de bord des coûts",
+    "log_out": "Déconnexion",
+    "empty_title": "Comment puis-je vous aider aujourd'hui ?",
+    "empty_description": "Envoyez un message pour démarrer cette conversation.",
+    "composer_placeholder": "Message à EASTA...",
+    "composer_hint": "EASTA peut effectuer des recherches sur le web et exécuter du code lorsque c'est utile, et accepte les images, les PDF et les fichiers DOCX — vérifiez toujours les informations importantes.",
+    "attach_file_title": "Joindre un fichier",
+    "send_message_aria": "Envoyer le message",
+    "thinking": "Réflexion en cours…",
+    "reply_language_label": "Langue de réponse",
+    "research_toggle_title": "Mode recherche : recherches multiples, lecture complète des sources, réponse avec citations",
+    "research_toggle_label": "Recherche",
+    "canvas_toggle_label": "Canevas",
+    "mic_button_title": "Saisie vocale"
+}
