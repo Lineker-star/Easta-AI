@@ -11,6 +11,7 @@
     <title>Cost dashboard — EASTA</title>
 
     {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
 
     <link
         rel="stylesheet"
@@ -101,6 +102,7 @@
     </script>
 
     <script src="{{ url_for('static', filename='usage.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
 
 </body>
 </html>

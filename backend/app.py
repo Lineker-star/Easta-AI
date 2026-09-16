@@ -1,14 +1,17 @@
 import base64
 import concurrent.futures
+import hashlib
 import io
 import json
 import mimetypes
 import os
 import re
+import secrets
 import subprocess
 import tempfile
 import time
 import urllib.parse
+import zipfile
 from collections import defaultdict, deque
 from collections.abc import Generator
 from datetime import datetime
@@ -20,7 +23,15 @@ from docx import Document as DocxDocument
 from docx.shared import Pt
 from docx.shared import RGBColor as DocxRGBColor
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from openai import OpenAI
@@ -264,6 +275,16 @@ class PasswordChangeRequest(BaseModel):
     confirm_new_password: str
 
 
+class ApiKeyCreateRequest(BaseModel):
+    name: str
+
+
+class PublicChatRequest(BaseModel):
+    message: str
+    conversation_id: int | None = None
+    language: str | None = None
+
+
 class ImageAttachment(BaseModel):
     name: str | None = None
     mime_type: str
@@ -314,6 +335,27 @@ class RegenerateImageRequest(BaseModel):
 
 
 def require_user(request: Request) -> int:
+    """Resolves the authenticated user id from either an
+    `Authorization: Bearer <api key>` header (see resolve_api_key()) or
+    the session cookie -- every existing require_user()-gated endpoint
+    picks up Bearer-token auth for free from this one change, no
+    per-route duplication needed. Both paths return the same kind of
+    user_id, so enforce_rate_limit(user_id) downstream already applies
+    equally to API-key traffic as to session traffic."""
+    authorization = request.headers.get("Authorization", "")
+
+    if authorization.startswith("Bearer "):
+        api_key = authorization[len("Bearer "):].strip()
+        user_id = resolve_api_key(api_key) if api_key else None
+
+        if user_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or revoked API key.",
+            )
+
+        return user_id
+
     user_id = request.session.get("user_id")
 
     if user_id is None:
@@ -483,6 +525,132 @@ def update_user_password(user_id: int, password_hash: str):
                 """,
                 (password_hash, user_id),
             )
+
+
+# --- API keys ------------------------------------------------------------
+# Backs the Account page's "API Keys" section and Bearer-token auth for
+# the public /v1/* API (see require_user() below). The plaintext key is
+# generated here and returned to the caller exactly once; only its hash
+# is ever persisted.
+#
+# NOTE on hashing: unlike users.password_hash (werkzeug's
+# generate_password_hash, deliberately slow to resist brute-forcing a
+# low-entropy human password), API keys are checked on *every*
+# authenticated request rather than once at login, and are already
+# high-entropy random tokens (256 bits from secrets.token_urlsafe) --
+# brute-forcing one is infeasible regardless of hash speed. A fast
+# SHA-256 is the right tool here (the same approach GitHub/Stripe-style
+# API keys use), not a deliberately slow password hash on every request.
+
+def generate_api_key() -> str:
+    return f"easta_{secrets.token_urlsafe(32)}"
+
+
+def hash_api_key(api_key: str) -> str:
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def create_api_key(user_id: int, name: str, key_hash: str):
+    """Returns (id, name, created_at, last_used_at, revoked_at)."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO api_keys (user_id, name, key_hash)
+                VALUES (%s, %s, %s)
+                RETURNING id, name, created_at, last_used_at, revoked_at;
+                """,
+                (user_id, name, key_hash),
+            )
+
+            return cursor.fetchone()
+
+
+def get_api_keys(user_id: int):
+    """Returns rows of (id, name, created_at, last_used_at,
+    revoked_at), newest first. Never includes key_hash."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, created_at, last_used_at, revoked_at
+                FROM api_keys
+                WHERE user_id = %s
+                ORDER BY created_at DESC;
+                """,
+                (user_id,),
+            )
+
+            return cursor.fetchall()
+
+
+def get_active_api_key_by_hash(key_hash: str):
+    """Returns (id, user_id) for a non-revoked key, or None."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, user_id
+                FROM api_keys
+                WHERE key_hash = %s AND revoked_at IS NULL;
+                """,
+                (key_hash,),
+            )
+
+            return cursor.fetchone()
+
+
+def touch_api_key(key_id: int):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE api_keys
+                SET last_used_at = CURRENT_TIMESTAMP
+                WHERE id = %s;
+                """,
+                (key_id,),
+            )
+
+
+def revoke_api_key(key_id: int, user_id: int):
+    """Returns the key's id if a matching, not-already-revoked key was
+    found and revoked, else None."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE api_keys
+                SET revoked_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND user_id = %s AND revoked_at IS NULL
+                RETURNING id;
+                """,
+                (key_id, user_id),
+            )
+
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+
+def resolve_api_key(api_key: str) -> int | None:
+    """Looks up a Bearer-token API key and, if valid and not revoked,
+    records its use and returns the owning user_id. Returns None for
+    any invalid/unknown/revoked key -- callers treat that as
+    unauthenticated, the same as a missing session."""
+    key_hash = hash_api_key(api_key)
+    row = get_active_api_key_by_hash(key_hash)
+
+    if not row:
+        return None
+
+    key_id, user_id = row
+
+    try:
+        touch_api_key(key_id)
+    except Exception as error:  # noqa: BLE001 - best-effort, auth still succeeds
+        print(f"EASTA: api key last_used_at update failed: {error!r}")
+
+    return user_id
 
 
 # --- Conversation / message helpers -----------------------------------------
@@ -3706,6 +3874,70 @@ def get_account_plan(request: Request):
     return {"plan": user[5]}
 
 
+@app.get("/api/account/api-keys")
+def list_api_keys(request: Request):
+    user_id = require_user(request)
+
+    rows = get_api_keys(user_id)
+
+    return {
+        "api_keys": [
+            {
+                "id": row[0],
+                "name": row[1],
+                "created_at": serialize_datetime(row[2]),
+                "last_used_at": (
+                    serialize_datetime(row[3]) if row[3] else None
+                ),
+                "revoked_at": (
+                    serialize_datetime(row[4]) if row[4] else None
+                ),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/account/api-keys")
+def create_new_api_key(data: ApiKeyCreateRequest, request: Request):
+    user_id = require_user(request)
+
+    name = data.name.strip()[:100]
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="A name is required for the key.",
+        )
+
+    api_key = generate_api_key()
+    row = create_api_key(user_id, name, hash_api_key(api_key))
+
+    return {
+        "id": row[0],
+        "name": row[1],
+        "created_at": serialize_datetime(row[2]),
+        # Shown exactly once -- only the hash is stored, so this
+        # can't be retrieved again after this response.
+        "key": api_key,
+    }
+
+
+@app.delete("/api/account/api-keys/{key_id}")
+def delete_api_key(key_id: int, request: Request):
+    user_id = require_user(request)
+
+    revoked_id = revoke_api_key(key_id, user_id)
+
+    if not revoked_id:
+        raise HTTPException(
+            status_code=404,
+            detail="API key not found (or already revoked).",
+        )
+
+    return {"message": "API key revoked."}
+
+
 # --- Routes: conversations -------------------------------------------------
 
 @app.get("/api/conversations")
@@ -4214,6 +4446,535 @@ def speak(data: SpeakRequest, request: Request):
     )
 
 
+# --- Bulk audio transcription --------------------------------------------
+# "Transcribe a large dataset of audios" is a batch job, not a single
+# request/response -- upload returns a job id immediately, and
+# transcription happens afterward. This first version uses FastAPI
+# BackgroundTasks (same process, runs after the response is sent), which
+# is fine for modest volume but has real limits worth being explicit
+# about:
+#   - No cross-instance durability: if the backend restarts or
+#     redeploys mid-job (or runs behind more than one instance), a
+#     queued/processing item can be stuck rather than picked up
+#     elsewhere -- there's no separate worker process or persistent
+#     queue watching for orphaned jobs.
+#   - No backpressure: a user could enqueue many large jobs back to
+#     back with only the per-file/per-job caps below limiting them,
+#     no global concurrency cap across jobs.
+# For genuinely large batches (hundreds of files / many hours of
+# audio), swap this for a real task queue -- Celery or RQ backed by
+# Redis, or a dedicated Sevalla background worker process -- consuming
+# from the same transcription_items table (or a proper queue) with
+# bounded concurrency per worker. See README "Suggested next steps".
+
+MAX_FILES_PER_TRANSCRIPTION_JOB = 50
+# OpenRouter's transcription endpoint documents a 25 MB multipart
+# upload limit (~26 min of 128kbps MP3) -- enforced here too so an
+# oversized file fails fast with a clear error instead of a confusing
+# provider error later.
+MAX_AUDIO_FILE_BYTES = 25 * 1024 * 1024
+# Guards the overall upload (particularly a .zip) against abuse --
+# well above what MAX_FILES_PER_TRANSCRIPTION_JOB legitimate files
+# would need.
+MAX_TRANSCRIPTION_UPLOAD_BYTES = 200 * 1024 * 1024
+MAX_TRANSCRIPTION_CONCURRENCY = 3
+
+SUPPORTED_AUDIO_EXTENSIONS = {
+    "mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "flac",
+}
+
+
+def create_transcription_job(user_id: int, total_files: int) -> int:
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO transcription_jobs (user_id, total_files)
+                VALUES (%s, %s)
+                RETURNING id;
+                """,
+                (user_id, total_files),
+            )
+
+            return cursor.fetchone()[0]
+
+
+def create_transcription_item(
+    job_id: int,
+    filename: str,
+    data: bytes | None,
+    status: str = "queued",
+    error: str | None = None,
+) -> int:
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO transcription_items (
+                    job_id, filename, data, status, error
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (job_id, filename[:255], data, status, error),
+            )
+
+            return cursor.fetchone()[0]
+
+
+def get_transcription_job(job_id: int, user_id: int):
+    """Returns (id, status, total_files, completed_files, created_at)
+    or None."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, status, total_files, completed_files, created_at
+                FROM transcription_jobs
+                WHERE id = %s AND user_id = %s;
+                """,
+                (job_id, user_id),
+            )
+
+            return cursor.fetchone()
+
+
+def get_transcription_job_owner(job_id: int) -> int | None:
+    """Returns just the owning user_id for a job, with no ownership
+    check -- used internally by the background worker (which already
+    trusts job_id, having created the job itself), not by any route
+    that takes job_id from a request."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT user_id FROM transcription_jobs WHERE id = %s;",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+
+def get_transcription_jobs(user_id: int):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, status, total_files, completed_files, created_at
+                FROM transcription_jobs
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 100;
+                """,
+                (user_id,),
+            )
+
+            return cursor.fetchall()
+
+
+def get_transcription_items(job_id: int):
+    """Returns rows of (id, filename, status, transcript_text, error,
+    created_at) -- never `data` (the raw audio bytes)."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, filename, status, transcript_text, error, created_at
+                FROM transcription_items
+                WHERE job_id = %s
+                ORDER BY id;
+                """,
+                (job_id,),
+            )
+
+            return cursor.fetchall()
+
+
+def get_transcription_items_to_process(job_id: int):
+    """Returns rows of (id, filename, data) for items still queued --
+    used by the background worker, not exposed to the API."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, filename, data
+                FROM transcription_items
+                WHERE job_id = %s AND status = 'queued';
+                """,
+                (job_id,),
+            )
+
+            return cursor.fetchall()
+
+
+def update_transcription_job_status(job_id: int, status: str):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE transcription_jobs
+                SET status = %s
+                WHERE id = %s;
+                """,
+                (status, job_id),
+            )
+
+
+def increment_transcription_job_completed(job_id: int):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE transcription_jobs
+                SET completed_files = completed_files + 1
+                WHERE id = %s;
+                """,
+                (job_id,),
+            )
+
+
+def update_transcription_item_status(item_id: int, status: str):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE transcription_items
+                SET status = %s
+                WHERE id = %s;
+                """,
+                (status, item_id),
+            )
+
+
+def save_transcription_item_result(
+    item_id: int,
+    status: str,
+    transcript_text: str | None = None,
+    error: str | None = None,
+):
+    """Sets the item's final status (done/failed) and clears `data`
+    (the raw audio bytes are no longer needed once processed, so
+    clearing them bounds storage growth)."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE transcription_items
+                SET status = %s, transcript_text = %s, error = %s, data = NULL
+                WHERE id = %s;
+                """,
+                (status, transcript_text, error, item_id),
+            )
+
+
+def get_transcription_item_with_job(item_id: int, job_id: int, user_id: int):
+    """Returns (filename, status, transcript_text, error) for an item,
+    scoped to a job owned by user_id, or None."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT ti.filename, ti.status, ti.transcript_text, ti.error
+                FROM transcription_items ti
+                JOIN transcription_jobs tj ON tj.id = ti.job_id
+                WHERE ti.id = %s AND ti.job_id = %s AND tj.user_id = %s;
+                """,
+                (item_id, job_id, user_id),
+            )
+
+            return cursor.fetchone()
+
+
+def extract_audio_entries_from_zip(zip_bytes: bytes) -> list[tuple[str, bytes]]:
+    """Returns (filename, data) for every non-directory entry in a
+    .zip upload -- including files with an unrecognized extension, so
+    they can surface as a clear "unsupported format" failed item
+    rather than being silently skipped during extraction."""
+    entries = []
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+
+            if len(entries) >= MAX_FILES_PER_TRANSCRIPTION_JOB:
+                break
+
+            entries.append((info.filename, archive.read(info)))
+
+    return entries
+
+
+def process_transcription_job(job_id: int):
+    """Runs after the upload response has already been sent (FastAPI
+    BackgroundTasks) -- transcribes every queued item in the job, with
+    limited concurrency (MAX_TRANSCRIPTION_CONCURRENCY), and marks the
+    job 'done' when finished. See the module comment above this
+    section for why this doesn't scale to hundreds of files."""
+    update_transcription_job_status(job_id, "processing")
+
+    owner_user_id = get_transcription_job_owner(job_id)
+    items = get_transcription_items_to_process(job_id)
+
+    def process_one(item):
+        item_id, filename, data = item
+
+        update_transcription_item_status(item_id, "processing")
+
+        try:
+            extension = (
+                filename.rsplit(".", 1)[-1].lower()
+                if "." in filename else ""
+            )
+
+            if extension not in SUPPORTED_AUDIO_EXTENSIONS:
+                raise ValueError(
+                    f"Unsupported format '{extension or 'unknown'}'."
+                )
+
+            if not data or len(data) > MAX_AUDIO_FILE_BYTES:
+                raise ValueError(
+                    "File exceeds the 25 MB provider limit."
+                )
+
+            text, cost_usd = transcribe_audio_bytes(data, extension)
+
+            if not text.strip():
+                raise ValueError("No speech was detected in this file.")
+
+            save_transcription_item_result(item_id, "done", transcript_text=text)
+
+            if cost_usd and owner_user_id is not None:
+                try:
+                    log_direct_cost(owner_user_id, None, STT_MODEL, cost_usd)
+                except Exception as usage_error:  # noqa: BLE001 - best-effort
+                    print(
+                        "EASTA: bulk transcription cost logging failed: "
+                        f"{usage_error!r}"
+                    )
+
+        except Exception as error:  # noqa: BLE001 - a per-item failure shouldn't stop the job
+            save_transcription_item_result(
+                item_id, "failed", error=str(error)
+            )
+
+        increment_transcription_job_completed(job_id)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=MAX_TRANSCRIPTION_CONCURRENCY
+    ) as executor:
+        list(executor.map(process_one, items))
+
+    update_transcription_job_status(job_id, "done")
+
+
+# --- Routes: bulk audio transcription ----------------------------------
+
+@app.post("/api/transcription-jobs")
+async def create_transcription_job_route(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+):
+    """Accepts one or more audio files, or a .zip of them, in a single
+    request; creates a job + one item per file, and returns
+    immediately -- transcription runs in the background (see
+    process_transcription_job()). Every item (including ones that will
+    fail validation) is created as 'queued' and validated uniformly
+    during processing, so upload itself stays fast regardless of batch
+    size."""
+    user_id = require_user(request)
+
+    enforce_rate_limit(user_id)
+
+    if not ENABLE_SERVER_STT:
+        raise HTTPException(
+            status_code=403,
+            detail="Server-side transcription is disabled.",
+        )
+
+    entries: list[tuple[str, bytes]] = []
+    total_bytes = 0
+
+    for upload in files:
+        data = await upload.read()
+        total_bytes += len(data)
+
+        if total_bytes > MAX_TRANSCRIPTION_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail="Upload is too large (200 MB limit).",
+            )
+
+        filename = upload.filename or "audio"
+
+        if filename.lower().endswith(".zip"):
+            entries.extend(extract_audio_entries_from_zip(data))
+        else:
+            entries.append((filename, data))
+
+    if not entries:
+        raise HTTPException(
+            status_code=400,
+            detail="No audio files were found in the upload.",
+        )
+
+    truncated = len(entries) > MAX_FILES_PER_TRANSCRIPTION_JOB
+    entries = entries[:MAX_FILES_PER_TRANSCRIPTION_JOB]
+
+    job_id = create_transcription_job(user_id, len(entries))
+
+    for filename, data in entries:
+        create_transcription_item(job_id, filename, data)
+
+    background_tasks.add_task(process_transcription_job, job_id)
+
+    return {
+        "job_id": job_id,
+        "total_files": len(entries),
+        "truncated": truncated,
+    }
+
+
+@app.get("/api/transcription-jobs")
+def list_transcription_jobs(request: Request):
+    user_id = require_user(request)
+
+    rows = get_transcription_jobs(user_id)
+
+    return {
+        "jobs": [
+            {
+                "id": row[0],
+                "status": row[1],
+                "total_files": row[2],
+                "completed_files": row[3],
+                "created_at": serialize_datetime(row[4]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.get("/api/transcription-jobs/{job_id}")
+def get_transcription_job_route(job_id: int, request: Request):
+    user_id = require_user(request)
+
+    job = get_transcription_job(job_id, user_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcription job not found.",
+        )
+
+    items = get_transcription_items(job_id)
+
+    return {
+        "job": {
+            "id": job[0],
+            "status": job[1],
+            "total_files": job[2],
+            "completed_files": job[3],
+            "created_at": serialize_datetime(job[4]),
+        },
+        "items": [
+            {
+                "id": row[0],
+                "filename": row[1],
+                "status": row[2],
+                "has_transcript": bool(row[3]),
+                "error": row[4],
+                "created_at": serialize_datetime(row[5]),
+            }
+            for row in items
+        ],
+    }
+
+
+@app.get("/api/transcription-jobs/{job_id}/items/{item_id}")
+def get_transcription_item_route(job_id: int, item_id: int, request: Request):
+    user_id = require_user(request)
+
+    item = get_transcription_item_with_job(item_id, job_id, user_id)
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcription item not found.",
+        )
+
+    filename, status, transcript_text, error = item
+
+    return {
+        "filename": filename,
+        "status": status,
+        "transcript_text": transcript_text,
+        "error": error,
+    }
+
+
+@app.get("/api/transcription-jobs/{job_id}/download")
+def download_transcription_job(
+    job_id: int,
+    request: Request,
+    format: str = "txt",
+):
+    user_id = require_user(request)
+
+    job = get_transcription_job(job_id, user_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcription job not found.",
+        )
+
+    items = get_transcription_items(job_id)
+    done_items = [row for row in items if row[2] == "done" and row[3]]
+
+    if not done_items:
+        raise HTTPException(
+            status_code=400,
+            detail="No completed transcripts to download yet.",
+        )
+
+    if format == "zip":
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for _id, filename, _status, transcript_text, _error, _created_at in done_items:
+                base_name = filename.rsplit(".", 1)[0] if "." in filename else filename
+                docx_bytes = render_markdown_to_docx(base_name, transcript_text)
+                archive.writestr(f"{base_name}.docx", docx_bytes)
+
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="transcription-job-{job_id}.zip"'
+                ),
+            },
+        )
+
+    # Default: one concatenated .txt file, each transcript under a
+    # filename header.
+    parts = [
+        f"=== {filename} ===\n{transcript_text}"
+        for _id, filename, _status, transcript_text, _error, _created_at in done_items
+    ]
+    combined_text = "\n\n".join(parts)
+
+    return Response(
+        content=combined_text.encode("utf-8"),
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="transcription-job-{job_id}.txt"'
+            ),
+        },
+    )
+
+
 # --- Routes: documents (RAG knowledge base) ---------------------------------
 
 @app.get("/api/documents")
@@ -4429,3 +5190,203 @@ def usage_logs_endpoint(request: Request, limit: int = 50):
             for row in rows
         ]
     }
+
+
+# --- Public API (v1) ----------------------------------------------------
+# A small, deliberately-scoped surface for third-party/programmatic
+# access -- see API.md for docs + a curl example. Authenticated with an
+# API key (Account page -> API Keys), via the same require_user() /
+# enforce_rate_limit() every internal endpoint already uses, so this
+# gets Bearer-token auth and per-user rate limiting for free rather
+# than duplicating either.
+
+def run_public_chat_turn(
+    conversation_id: int,
+    user_id: int,
+    language: str | None = None,
+) -> str:
+    """Runs one assistant turn and returns the complete reply as a
+    plain string -- the non-streaming counterpart to
+    build_streaming_response(), used by POST /v1/chat. Deliberately
+    simpler than the internal endpoint (no research mode, canvas, or
+    image-style composer hints for v1 -- just RAG grounding, a
+    reply-language override, and the same tool-calling loop via
+    stream_with_tools()) rather than exposing every internal feature
+    through the public API. This does duplicate some of
+    build_streaming_response()'s turn logic rather than sharing it
+    directly -- deliberate, to keep the streaming endpoint that the
+    whole live chat UI depends on untouched by v1's simpler needs."""
+    conversation = get_conversation(conversation_id, user_id)
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    last_message = get_last_message(conversation_id)
+    is_latest_from_user = bool(last_message) and last_message[1] == "user"
+    latest_user_text = last_message[2] if is_latest_from_user else ""
+    latest_user_attachments = (
+        last_message[3] if is_latest_from_user else None
+    )
+    has_image_attachments = any(
+        attachment.get("type") == "image"
+        for attachment in (latest_user_attachments or [])
+    )
+
+    rag_message = build_rag_system_message(latest_user_text, user_id)
+    language_message = build_language_override_message(language)
+    canvas_message = build_canvas_context_message(conversation_id)
+
+    llm_context = build_llm_context(
+        conversation_id,
+        conversation,
+        rag_message,
+        language_message,
+        None,
+        canvas_message,
+        None,
+    )
+
+    models_to_try = (
+        model_chain_for_images() if has_image_attachments
+        else model_chain_for(latest_user_text)
+    )
+
+    complete_response = ""
+
+    for attempt, model in enumerate(models_to_try):
+        sent_any_output = False
+
+        try:
+            for kind, payload in stream_with_tools(
+                llm_context, model, user_id=user_id, conversation_id=conversation_id,
+            ):
+                if kind == "token":
+                    complete_response += payload
+                    sent_any_output = True
+
+                elif kind == "canvas":
+                    if payload.get("type") == "file_card":
+                        extension = {
+                            "pdf": ".pdf", "docx": ".docx", "pptx": ".pptx",
+                        }.get(payload.get("format"), "")
+                        complete_response += (
+                            f"\n\n📄 [Download "
+                            f"{payload['title']}{extension}]"
+                            f"({payload['download_url']})"
+                        )
+                    elif payload.get("type") == "image_result":
+                        complete_response += (
+                            f"\n\n![{payload['prompt']}]"
+                            f"({payload['download_url']})"
+                        )
+
+                elif kind == "usage":
+                    try:
+                        log_usage(
+                            user_id,
+                            conversation_id,
+                            model,
+                            payload.prompt_tokens or 0,
+                            payload.completion_tokens or 0,
+                        )
+                    except Exception as usage_error:  # noqa: BLE001
+                        print(f"EASTA: usage logging failed: {usage_error!r}")
+
+            break
+
+        except Exception as error:
+            print(
+                f"EASTA: model '{model}' failed (v1 chat, attempt "
+                f"{attempt + 1}/{len(models_to_try)}): {error!r}"
+            )
+
+            if sent_any_output:
+                break
+
+            if attempt == len(models_to_try) - 1:
+                raise HTTPException(
+                    status_code=502,
+                    detail="EASTA could not complete the response right now.",
+                ) from error
+
+            continue
+
+    if complete_response:
+        save_message(conversation_id, "assistant", complete_response)
+
+        try:
+            fresh_conversation = get_conversation(conversation_id, user_id)
+            if fresh_conversation:
+                maybe_summarize_conversation(conversation_id, fresh_conversation)
+        except Exception as error:  # noqa: BLE001
+            print(f"EASTA: post-turn summarization skipped (v1 chat): {error!r}")
+
+    return complete_response
+
+
+@app.post("/v1/chat")
+def public_chat(data: PublicChatRequest, request: Request):
+    user_id = require_user(request)
+
+    enforce_rate_limit(user_id)
+
+    message = data.message.strip()
+
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="message is required.",
+        )
+
+    if len(message) > 12000:
+        raise HTTPException(
+            status_code=400,
+            detail="message is too long (12,000 character limit).",
+        )
+
+    if data.conversation_id is not None:
+        conversation = get_conversation(data.conversation_id, user_id)
+
+        if not conversation:
+            raise HTTPException(
+                status_code=404,
+                detail="conversation_id not found.",
+            )
+
+        conversation_id = data.conversation_id
+    else:
+        conversation = create_conversation(user_id)
+        conversation_id = conversation[0]
+
+    save_message(conversation_id, "user", message)
+    rename_conversation_if_default(conversation_id, message)
+
+    reply_text = run_public_chat_turn(conversation_id, user_id, data.language)
+
+    return {
+        "conversation_id": conversation_id,
+        "message": {
+            "role": "assistant",
+            "content": reply_text,
+        },
+    }
+
+
+@app.get("/v1/me")
+def public_me(request: Request):
+    user_id = require_user(request)
+
+    user = get_user_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Account not found.",
+        )
+
+    _id, username, _email, _password_hash, _created_at, plan = user
+
+    return {"username": username, "plan": plan}

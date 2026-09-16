@@ -11,6 +11,7 @@
     <title>EASTA</title>
 
     {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
 
     <link
         rel="stylesheet"
@@ -96,6 +97,24 @@
                 >
                     ⚙️ Account
                 </a>
+
+                <a
+                    href="{{ url_for('transcriptions') }}"
+                    class="sidebar-footer-link"
+                    data-i18n="transcriptions_link"
+                >
+                    🎙️ Bulk transcription
+                </a>
+
+                <button
+                    type="button"
+                    class="sidebar-footer-link"
+                    data-install-button
+                    data-i18n="install_app_link"
+                    hidden
+                >
+                    ⬇️ Install app
+                </button>
 
                 <button
                     type="button"
@@ -315,6 +334,7 @@
 
     <script src="{{ url_for('static', filename='i18n.js') }}"></script>
     <script src="{{ url_for('static', filename='chat.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
 
 </body>
 </html>

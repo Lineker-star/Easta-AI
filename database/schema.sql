@@ -182,3 +182,72 @@ CREATE TABLE IF NOT EXISTS public.canvas_artifacts (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT canvas_artifacts_kind_check CHECK (((kind)::text = ANY ((ARRAY['document'::character varying, 'code'::character varying, 'image'::character varying])::text[])))
 );
+
+--
+-- api_keys
+-- Backs the Account page's "API Keys" section and Bearer-token auth
+-- for the public /v1/* API (see require_user() / resolve_api_key() in
+-- backend/app.py). The plaintext key is shown to the user exactly
+-- once, at creation time, in the API response -- only its hash is
+-- ever stored, same idea as password hashing (see key_hash's
+-- generation for why it's a plain SHA-256 rather than
+-- werkzeug's generate_password_hash, unlike users.password_hash).
+--
+
+CREATE TABLE IF NOT EXISTS public.api_keys (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    name character varying(100) NOT NULL,
+    key_hash character varying(64) NOT NULL UNIQUE,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    last_used_at timestamp with time zone,
+    revoked_at timestamp with time zone
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user_id
+    ON public.api_keys (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash
+    ON public.api_keys (key_hash);
+
+--
+-- transcription_jobs / transcription_items
+-- Backs bulk audio transcription (see the "Bulk transcription" section
+-- in backend/app.py): one job per upload batch (several files, or a
+-- .zip of them), one item per audio file. Uploading returns the job
+-- id immediately -- transcription runs afterward (FastAPI
+-- BackgroundTasks for now; see the README for why that doesn't scale
+-- to hundreds of files). `transcription_items.data` holds the raw
+-- audio bytes only until that item is processed (success or failure),
+-- then gets cleared to NULL to bound storage growth -- same
+-- prototype-grade storage tradeoff as generated_files/
+-- messages.attachments (Postgres bytea, not object storage).
+--
+
+CREATE TABLE IF NOT EXISTS public.transcription_jobs (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    status character varying(20) NOT NULL DEFAULT 'queued',
+    total_files integer NOT NULL DEFAULT 0,
+    completed_files integer NOT NULL DEFAULT 0,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT transcription_jobs_status_check CHECK (((status)::text = ANY ((ARRAY['queued'::character varying, 'processing'::character varying, 'done'::character varying, 'failed'::character varying])::text[])))
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcription_jobs_user_id
+    ON public.transcription_jobs (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.transcription_items (
+    id serial PRIMARY KEY,
+    job_id integer NOT NULL REFERENCES public.transcription_jobs(id) ON DELETE CASCADE,
+    filename character varying(255) NOT NULL,
+    status character varying(20) NOT NULL DEFAULT 'queued',
+    data bytea,
+    transcript_text text,
+    error text,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT transcription_items_status_check CHECK (((status)::text = ANY ((ARRAY['queued'::character varying, 'processing'::character varying, 'done'::character varying, 'failed'::character varying])::text[])))
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcription_items_job_id
+    ON public.transcription_items (job_id, created_at);

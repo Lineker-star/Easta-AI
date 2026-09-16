@@ -1,7 +1,7 @@
 import os
 
 from dotenv import load_dotenv
-from flask import Flask, render_template
+from flask import Flask, render_template, send_from_directory
 
 
 load_dotenv()
@@ -69,3 +69,23 @@ def account():
         "account.html",
         backend_url=BACKEND_URL,
     )
+
+
+@app.get("/transcriptions")
+@app.get("/transcriptions/<int:job_id>")
+def transcriptions(job_id=None):
+    return render_template(
+        "transcriptions.html",
+        backend_url=BACKEND_URL,
+        job_id=job_id,
+    )
+
+
+@app.get("/sw.js")
+def service_worker():
+    # Served at the site root (not /static/sw.js) so its default scope
+    # covers the whole app rather than just /static/ -- see
+    # frontend/static/sw.js and pwa.js's registration call.
+    response = send_from_directory(app.static_folder, "sw.js")
+    response.headers["Cache-Control"] = "no-cache"
+    return response

@@ -181,6 +181,13 @@ button {
     white-space: nowrap;
 }
 
+/* See the note above .canvas-toggle-button[hidden] -- .btn's own
+   `display` would otherwise beat the browser's default
+   [hidden] { display: none }. */
+.btn[hidden] {
+    display: none;
+}
+
 .btn:active {
     transform: translateY(1px);
 }
@@ -786,6 +793,13 @@ button {
     cursor: pointer;
     text-align: left;
     font-family: var(--font-body);
+}
+
+/* See the note above .canvas-toggle-button[hidden] -- this control's
+   own `display: flex` would otherwise beat the browser's default
+   [hidden] { display: none }. */
+.sidebar-footer-link[hidden] {
+    display: none;
 }
 
 .sidebar-footer-link:hover {
@@ -1890,6 +1904,88 @@ button {
     background: var(--color-accent-soft);
     color: var(--color-accent-hover);
     font-weight: 600;
+}
+
+#api-keys-list {
+    margin-bottom: 20px;
+}
+
+.api-key-revoked-label {
+    font-size: 12.5px;
+    color: var(--color-text-faint);
+    font-style: italic;
+}
+
+.api-key-reveal {
+    margin-top: 16px;
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+    background: var(--color-accent-soft);
+    border: 1px solid var(--color-accent-soft-strong);
+    max-width: 420px;
+}
+
+.api-key-reveal-warning {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-accent-hover);
+}
+
+.api-key-reveal-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.api-key-reveal-row code {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+#upload-form {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+#chosen-files-summary {
+    flex: 1;
+    min-width: 160px;
+}
+
+.job-download-actions {
+    display: flex;
+    gap: 10px;
+    margin: 12px 0 16px;
+}
+
+.transcript-detail-row td {
+    padding-top: 0;
+}
+
+.transcript-preview {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    background: var(--color-bg-soft);
+    border: 1px solid var(--color-border);
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    max-height: 260px;
+    overflow-y: auto;
 }
 
 /* =========================================================================

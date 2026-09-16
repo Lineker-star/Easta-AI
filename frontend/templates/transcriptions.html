@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Bulk transcription — EASTA</title>
+
+    {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+</head>
+
+<body class="usage-page">
+
+    <div class="usage-shell">
+
+        <div class="usage-header">
+            <div class="brand-row">
+                <span class="brand-mark">E</span>
+                <div>
+                    <h1>Bulk transcription</h1>
+                </div>
+            </div>
+
+            <a href="{{ url_for('chat') }}" class="btn btn-secondary">
+                &larr; Back to chat
+            </a>
+        </div>
+
+        <div class="usage-panel">
+            <h2>New transcription job</h2>
+
+            <p class="account-meta">
+                Upload multiple audio files, or a single .zip of them
+                (50 files / 25&nbsp;MB per file limit — see
+                <a href="https://github.com/Lineker-star/Easta-AI/blob/main/README.md" target="_blank" rel="noopener noreferrer">README</a>
+                for details). Transcription runs in the background —
+                this page will show progress as it goes.
+            </p>
+
+            <p id="upload-error" class="error-message"></p>
+
+            <form id="upload-form">
+                <input
+                    type="file"
+                    id="audio-files-input"
+                    multiple
+                    accept="audio/*,.zip,.mp3,.wav,.m4a,.ogg,.flac,.webm"
+                    hidden
+                >
+
+                <button
+                    type="button"
+                    id="choose-files-button"
+                    class="btn btn-secondary"
+                >
+                    Choose files
+                </button>
+
+                <span id="chosen-files-summary" class="account-meta"></span>
+
+                <button
+                    type="submit"
+                    id="start-job-button"
+                    class="btn btn-primary"
+                    disabled
+                >
+                    Start transcription job
+                </button>
+            </form>
+        </div>
+
+        <div class="usage-panel" id="job-detail-panel" hidden>
+            <h2>Job #<span id="job-id-label"></span></h2>
+
+            <p>
+                Status:
+                <span id="job-status-badge" class="plan-badge">—</span>
+                — <span id="job-progress-label"></span>
+            </p>
+
+            <div class="job-download-actions">
+                <a
+                    id="download-txt-link"
+                    class="btn btn-secondary"
+                    hidden
+                >
+                    ⬇ Download all (.txt)
+                </a>
+
+                <a
+                    id="download-zip-link"
+                    class="btn btn-secondary"
+                    hidden
+                >
+                    ⬇ Download all (.docx zip)
+                </a>
+            </div>
+
+            <table class="usage-table" id="job-items-table">
+                <thead>
+                    <tr>
+                        <th>File</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="job-items-body"></tbody>
+            </table>
+        </div>
+
+        <div class="usage-panel">
+            <h2>Past jobs</h2>
+            <div id="job-list"></div>
+        </div>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+        window.INITIAL_JOB_ID = {{ job_id | tojson }};
+    </script>
+
+    <script src="{{ url_for('static', filename='transcriptions.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
+
+</body>
+</html>

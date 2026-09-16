@@ -4,6 +4,8 @@
     "new_chat": "+ New chat",
     "cost_dashboard": "📊 Cost dashboard",
     "account_link": "⚙️ Account",
+    "transcriptions_link": "🎙️ Bulk transcription",
+    "install_app_link": "⬇️ Install app",
     "log_out": "Log out",
     "empty_title": "How can I help you today?",
     "empty_description": "Send a message to begin this conversation.",

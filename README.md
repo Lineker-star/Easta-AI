@@ -293,6 +293,109 @@ production traffic. Pick these up in Cursor:
     fallback only if that field is ever missing, so every call still
     gets a non-zero, correctly-attributed row in `usage_logs` — not
     silently uncounted, and not mis-costed as text tokens.
+- **API keys + a public API** — an **API Keys** section on the
+  Account page: generate a key (shown in full exactly once, at
+  creation — only its SHA-256 hash is ever stored), see existing keys
+  with their created/last-used dates, and revoke one instantly.
+  Backed by a new `api_keys` table.
+  - **Bearer-token auth**: `require_user()` — the single auth check
+    every existing endpoint already calls — now also accepts
+    `Authorization: Bearer <key>` as an alternative to the session
+    cookie, resolving to the same `user_id` either way. Every
+    endpoint in the app accepts either automatically, with no
+    per-route changes, and `enforce_rate_limit(user_id)` downstream
+    already applies equally to both, so a leaked key can't bypass
+    rate limiting.
+  - ⚠️ **Deliberate deviation from "hash it like a password"**: API
+    keys use a plain SHA-256 (`hash_api_key()`), not werkzeug's
+    `generate_password_hash`. Passwords are checked once at login and
+    are low-entropy, so deliberately slow hashing (bcrypt/scrypt)
+    resists brute-forcing; API keys are checked on *every* request and
+    are already 256 bits of random entropy (`secrets.token_urlsafe`),
+    where brute-forcing is infeasible regardless of hash speed and a
+    slow hash would add real latency to every call — the same
+    reasoning GitHub/Stripe-style API keys use. Explained in a comment
+    above the `api_keys` table in `database/schema.sql`.
+  - **Public API**: a small, versioned `/v1/*` surface, separate from
+    the internal `/api/*` endpoints the web frontend uses (those can
+    change without notice; `/v1/*` won't) — `POST /v1/chat` (send a
+    message, get a complete non-streamed response — third-party
+    clients don't need to parse EASTA's internal SSE-like protocol)
+    and `GET /v1/me`. Documented in **[API.md](API.md)** with a curl
+    example. Deliberately minimal — no streaming, images, research
+    mode, or conversation management via the public API yet.
+- **Installable app (PWA)** — EASTA is installable from the browser on
+  desktop (Chrome/Edge show an install icon in the address bar) and
+  Android (Chrome's "Install app" prompt), launching standalone
+  without browser chrome, with an on-brand terracotta "E" icon
+  (`frontend/static/icons/`, generated from the same gradient as the
+  in-app brand mark). An **⬇ Install app** button appears on the
+  landing page and in the chat sidebar footer once the browser signals
+  it's installable; iOS Safari has no programmatic install prompt at
+  all, so there it shows the manual "Share → Add to Home Screen"
+  instructions instead. A minimal service worker
+  (`frontend/static/sw.js`, registered at the site root via
+  `GET /sw.js` in `frontend/app.py` so its scope covers the whole
+  app) caches the static shell (CSS/JS/icons) for fast repeat loads —
+  it deliberately never caches `/api/*` or `/v1/*`, so chat data is
+  always live.
+  - ⚠️ **No literal `.apk` file**: a real, installable Android package
+    needs native build tooling (Android SDK, Gradle, a signing
+    keystore) that doesn't exist in a Flask/FastAPI web stack — that
+    isn't something to fake or half-build here. What's shipped instead
+    (the PWA above) is how most web-based AI apps actually deliver
+    their "app" experience, and installing one from Chrome on Android
+    is functionally equivalent to installing an APK (a home-screen
+    icon, standalone window, offline-capable shell) without needing
+    the Play Store. To produce an actual signed `.apk`/`.aab` for Play
+    Store distribution later, wrap this PWA with **Bubblewrap**
+    (Google's CLI, `npx @bubblewrap/cli init --manifest=https://YOUR-DOMAIN/static/manifest.json`)
+    or **[PWABuilder](https://www.pwabuilder.com/)** — both generate an
+    Android Studio project from the manifest already in this repo; you
+    still need the Android SDK and your own signing key to build and
+    publish it.
+- **Bulk audio transcription** — a **🎙️ Bulk transcription** page
+  (linked from the chat sidebar) for transcribing many audio files at
+  once: upload several files or a single `.zip` of them, get a job id
+  back immediately, and watch per-file progress as transcription runs
+  in the background — designed as a batch job from the start, not a
+  single blocking request.
+  - **Schema**: `transcription_jobs` (one row per upload batch) +
+    `transcription_items` (one row per audio file, holding the raw
+    bytes only until processed, then cleared to bound storage growth).
+  - **Upload**: `POST /api/transcription-jobs` accepts multiple files
+    or a `.zip`, creates the job + one item per file (capped at 50
+    files/job — extra files are dropped with `truncated: true` in the
+    response, not silently over-accepted), and returns immediately.
+  - **Processing**: `process_transcription_job()` runs via FastAPI
+    `BackgroundTasks` — same process, after the upload response is
+    sent — transcribing up to 3 files concurrently
+    (`MAX_TRANSCRIPTION_CONCURRENCY`) through the same
+    `transcribe_audio_bytes()` (OpenRouter Whisper) used by the
+    composer's mic fallback. Each item is validated independently
+    (format against `SUPPORTED_AUDIO_EXTENSIONS`, size against
+    OpenRouter's documented 25 MB transcription limit) and a failure
+    is recorded with a clear `error` string on that item — the job
+    keeps going, one bad file doesn't stop the batch.
+  - ⚠️ **Explicitly a first version, not the production-scale
+    answer**: `BackgroundTasks` has no cross-instance durability (a
+    mid-job restart, redeploy, or running more than one backend
+    instance can strand a queued item with nothing picking it back
+    up) and no global concurrency cap across jobs — fine for modest
+    volume, not for "hundreds of files / many hours of audio." A
+    detailed comment above `process_transcription_job()` in
+    `backend/app.py` calls out the production-hardening step
+    explicitly: swap it for a real task queue (Celery or RQ backed by
+    Redis, or a dedicated Sevalla background worker process)
+    consuming from the same tables with bounded concurrency per
+    worker.
+  - **Downloads**: once a job has any completed items,
+    `GET /api/transcription-jobs/{id}/download` offers a concatenated
+    `.txt` (each transcript under a `=== filename ===` header) or a
+    `.zip` of one `.docx` per file (reusing `render_markdown_to_docx()`
+    from the document-generation work). Individual transcripts are
+    also viewable inline per-item on the job page without downloading
+    anything.
 
 ## Run locally
 
@@ -720,6 +823,28 @@ application.
   `backend/app.py`).
 - Add OCR-less image/chart support to `create_document`'s structured
   sections (currently text + tables only, no embedded images).
+- Give API keys scopes/permissions (e.g. read-only vs. chat) instead
+  of one all-or-nothing key per name — `api_keys` has no scope column
+  yet.
+- Add streaming, image attachments, and research mode to `POST
+  /v1/chat` once there's real third-party demand for them — see "Not
+  included in v1 (yet)" in `API.md`.
+- Regenerate the PWA icons in `frontend/static/icons/` with the actual
+  Fraunces font instead of the Georgia Bold stand-in used to produce
+  them, for a pixel-perfect brand match (they were generated with
+  Pillow from the same gradient/color values as `.brand-mark` in
+  `styles.css` — the generation script itself isn't checked into the
+  repo, just its PNG output).
+- Actually build and sign an Android `.apk`/`.aab` via Bubblewrap or
+  PWABuilder from `frontend/static/manifest.json` once you're ready
+  for Play Store distribution (needs the Android SDK + a signing key,
+  neither of which live in this repo).
+- Move bulk transcription off FastAPI `BackgroundTasks` onto a real
+  task queue (Celery/RQ + Redis, or a Sevalla background worker
+  process) before relying on it for genuinely large batches — see the
+  comment above `process_transcription_job()` in `backend/app.py` for
+  exactly what that change needs to cover (cross-instance durability,
+  a global concurrency cap).
 
 ## Tech stack
 

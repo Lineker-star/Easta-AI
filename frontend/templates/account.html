@@ -11,6 +11,7 @@
     <title>Account — EASTA</title>
 
     {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
 
     <link
         rel="stylesheet"
@@ -161,8 +162,8 @@
                         </tr>
                         <tr>
                             <td>API access</td>
-                            <td>—</td>
-                            <td class="plan-table-premium">✓</td>
+                            <td>✓ (standard rate limit)</td>
+                            <td class="plan-table-premium">✓ (higher rate limit)</td>
                         </tr>
                     </tbody>
                 </table>
@@ -179,6 +180,54 @@
             </button>
         </div>
 
+        <div class="usage-panel">
+            <h2>API Keys</h2>
+
+            <p class="account-meta">
+                For third-party/programmatic access to EASTA — see
+                <a href="https://github.com/Lineker-star/Easta-AI/blob/main/API.md" target="_blank" rel="noopener noreferrer">API.md</a>
+                for the full reference and a curl example. Each key is
+                shown in full only once, right after you create it.
+            </p>
+
+            <p id="api-keys-error" class="error-message"></p>
+
+            <div id="api-keys-list"></div>
+
+            <form id="new-api-key-form" class="login-form">
+                <div class="login-field">
+                    <label for="api-key-name">New key name</label>
+                    <input
+                        type="text"
+                        id="api-key-name"
+                        placeholder="e.g. My integration"
+                        maxlength="100"
+                        required
+                    >
+                </div>
+
+                <button type="submit" class="btn btn-primary">
+                    Generate new key
+                </button>
+            </form>
+
+            <div id="new-api-key-reveal" class="api-key-reveal" hidden>
+                <p class="api-key-reveal-warning">
+                    ⚠️ Copy this key now — it won't be shown again.
+                </p>
+                <div class="api-key-reveal-row">
+                    <code id="new-api-key-value"></code>
+                    <button
+                        type="button"
+                        id="copy-new-api-key"
+                        class="btn btn-secondary"
+                    >
+                        Copy
+                    </button>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <script>
@@ -186,6 +235,7 @@
     </script>
 
     <script src="{{ url_for('static', filename='account.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
 
 </body>
 </html>

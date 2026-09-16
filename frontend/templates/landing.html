@@ -17,6 +17,7 @@
     >
 
     {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
 
     <link
         rel="stylesheet"
@@ -69,6 +70,15 @@
             <a href="{{ url_for('login_page') }}" class="btn btn-secondary">
                 I already have an account
             </a>
+
+            <button
+                type="button"
+                class="btn btn-ghost"
+                data-install-button
+                hidden
+            >
+                ⬇ Install app
+            </button>
         </div>
 
     </header>
@@ -190,6 +200,8 @@
     <footer class="landing-footer">
         EASTA — built for Africa.
     </footer>
+
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
 
 </body>
 </html>
