@@ -1065,6 +1065,80 @@ button {
     text-decoration: underline;
 }
 
+.file-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 4px;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    background: var(--color-bg-soft);
+    border: 1px solid var(--color-border-strong);
+    text-decoration: none;
+    max-width: 360px;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.file-card:hover {
+    background: var(--color-accent-soft);
+    border-color: var(--color-accent-soft-strong);
+    text-decoration: none;
+}
+
+.file-card-icon {
+    flex-shrink: 0;
+    font-size: 24px;
+    line-height: 1;
+}
+
+.file-card-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.file-card-name {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-card-meta {
+    font-size: 12px;
+    color: var(--color-text-faint);
+    margin-top: 2px;
+}
+
+.file-card-download {
+    flex-shrink: 0;
+    font-size: 16px;
+    color: var(--color-accent);
+}
+
+.image-result {
+    margin-top: 6px;
+    max-width: 360px;
+}
+
+.image-result-img {
+    display: block;
+    width: 100%;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+}
+
+.image-result.image-result-loading .image-result-img {
+    opacity: 0.5;
+}
+
+.image-result-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+}
+
 /* markdown content inside assistant bubbles */
 
 .assistant-message p {
@@ -1434,6 +1508,32 @@ button {
     background: var(--color-accent-soft);
     border-color: var(--color-accent-soft-strong);
     color: var(--color-accent-hover);
+}
+
+.composer-select {
+    flex-shrink: 0;
+    padding: 7px 10px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-strong);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    max-width: 120px;
+}
+
+.composer-select:hover {
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+}
+
+/* See the note above .canvas-toggle-button[hidden] -- these controls
+   set their own `display`, which would otherwise beat the browser's
+   default [hidden] { display: none }. */
+.composer-select[hidden] {
+    display: none;
 }
 
 #send-button {

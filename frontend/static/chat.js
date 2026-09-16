@@ -16,6 +16,7 @@ const fileInput = document.getElementById("file-input");
 const attachmentRow = document.getElementById("attachment-row");
 const languageSelect = document.getElementById("language-select");
 const researchToggle = document.getElementById("research-toggle");
+const imageStyleSelect = document.getElementById("image-style-select");
 const canvasToggleButton = document.getElementById("canvas-toggle-button");
 const canvasPanel = document.getElementById("canvas-panel");
 const canvasKindBadge = document.getElementById("canvas-kind-badge");
@@ -95,6 +96,32 @@ researchToggle.addEventListener("click", () => {
         window.localStorage.setItem("easta_research_mode", String(researchMode));
     } catch {
         // Not persisted this session, but the in-memory toggle still works.
+    }
+});
+
+
+/* Image style control (composer): a composer-level alternative to the
+ * model's own generate_image aspect_ratio argument — see
+ * build_image_style_message() in backend/app.py. Hidden entirely when
+ * generation is disabled server-side (see loadFeatures() in
+ * bootstrap()). */
+let imageAspectRatio = "auto";
+
+try {
+    imageAspectRatio = window.localStorage.getItem("easta_image_aspect_ratio") || "auto";
+} catch {
+    // localStorage unavailable — default to "auto" for this session.
+}
+
+imageStyleSelect.value = imageAspectRatio;
+
+imageStyleSelect.addEventListener("change", () => {
+    imageAspectRatio = imageStyleSelect.value;
+
+    try {
+        window.localStorage.setItem("easta_image_aspect_ratio", imageAspectRatio);
+    } catch {
+        // Not persisted this session, but the in-memory value still applies.
     }
 });
 
@@ -374,6 +401,142 @@ function absoluteBackendUrl(path) {
         return path;
     }
     return `${window.BACKEND_URL}${path}`;
+}
+
+
+/* --- file cards (create_document tool output) ------------------------- */
+
+const FILE_FORMAT_ICONS = {
+    pdf: "📄",
+    docx: "📝",
+    pptx: "📽️"
+};
+
+
+function formatFileSize(bytes) {
+    if (!bytes || bytes < 1024) {
+        return `${bytes || 0} B`;
+    }
+    if (bytes < 1024 * 1024) {
+        return `${(bytes / 1024).toFixed(1)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+
+function renderFileCard(contentArea, fileEvent) {
+    const card = document.createElement("a");
+    card.className = "file-card";
+    card.href = absoluteBackendUrl(fileEvent.download_url);
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+
+    const icon = document.createElement("div");
+    icon.className = "file-card-icon";
+    icon.textContent = FILE_FORMAT_ICONS[fileEvent.format] || "📄";
+
+    const info = document.createElement("div");
+    info.className = "file-card-info";
+
+    const name = document.createElement("div");
+    name.className = "file-card-name";
+    name.textContent = fileEvent.title;
+
+    const meta = document.createElement("div");
+    meta.className = "file-card-meta";
+    meta.textContent =
+        `${(fileEvent.format || "").toUpperCase()} · ${formatFileSize(fileEvent.size_bytes)}`;
+
+    info.appendChild(name);
+    info.appendChild(meta);
+
+    const downloadIcon = document.createElement("div");
+    downloadIcon.className = "file-card-download";
+    downloadIcon.textContent = "⬇";
+    downloadIcon.setAttribute("aria-hidden", "true");
+
+    card.appendChild(icon);
+    card.appendChild(info);
+    card.appendChild(downloadIcon);
+
+    contentArea.appendChild(card);
+}
+
+
+/* --- inline image results (generate_image tool output) -------------------- */
+
+function renderImageResult(contentArea, imageEvent) {
+    const wrap = document.createElement("div");
+    wrap.className = "image-result";
+
+    const image = document.createElement("img");
+    image.className = "image-result-img";
+    image.src = absoluteBackendUrl(imageEvent.download_url);
+    image.alt = imageEvent.prompt || "Generated image";
+
+    const actions = document.createElement("div");
+    actions.className = "image-result-actions";
+
+    const downloadLink = document.createElement("a");
+    downloadLink.className = "message-action-button";
+    downloadLink.href = absoluteBackendUrl(imageEvent.download_url);
+    downloadLink.target = "_blank";
+    downloadLink.rel = "noopener noreferrer";
+    downloadLink.textContent = "⬇ Download";
+
+    const regenerateButton = document.createElement("button");
+    regenerateButton.type = "button";
+    regenerateButton.className = "message-action-button";
+    regenerateButton.textContent = "🔄 Regenerate";
+    regenerateButton.addEventListener("click", () => {
+        regenerateImage(wrap, image, downloadLink, regenerateButton, imageEvent);
+    });
+
+    actions.appendChild(downloadLink);
+    actions.appendChild(regenerateButton);
+
+    wrap.appendChild(image);
+    wrap.appendChild(actions);
+    contentArea.appendChild(wrap);
+}
+
+
+async function regenerateImage(wrap, image, downloadLink, button, imageEvent) {
+    button.disabled = true;
+
+    const originalText = button.textContent;
+    button.textContent = "🔄 Regenerating…";
+    wrap.classList.add("image-result-loading");
+
+    try {
+        const response = await apiRequest("/api/regenerate-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                prompt: imageEvent.prompt,
+                aspect_ratio: imageEvent.aspect_ratio,
+                conversation_id: activeConversationId
+            })
+        });
+
+        const data = await readJsonResponse(response);
+
+        imageEvent.id = data.id;
+        imageEvent.download_url = data.download_url;
+
+        const newUrl = absoluteBackendUrl(data.download_url);
+        image.src = newUrl;
+        downloadLink.href = newUrl;
+
+    } catch (error) {
+        console.error(error);
+        window.alert(error.message || "Could not regenerate the image.");
+
+    } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+        wrap.classList.remove("image-result-loading");
+    }
 }
 
 
@@ -734,6 +897,8 @@ const MAX_IMAGES_PER_MESSAGE = 4;
 
 const DOCX_MIME_TYPE =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const PPTX_MIME_TYPE =
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
 
 function readFileAsDataURL(file) {
@@ -755,6 +920,10 @@ function attachmentIcon(attachment) {
 
     if (lowerName.endsWith(".docx")) {
         return "📝";
+    }
+
+    if (lowerName.endsWith(".pptx")) {
+        return "📽️";
     }
 
     return "📎";
@@ -919,6 +1088,8 @@ async function handleAttachedFile(file) {
     } else if (file.type === "application/pdf" || lowerName.endsWith(".pdf")) {
         await attachDocumentFile(file);
     } else if (file.type === DOCX_MIME_TYPE || lowerName.endsWith(".docx")) {
+        await attachDocumentFile(file);
+    } else if (file.type === PPTX_MIME_TYPE || lowerName.endsWith(".pptx")) {
         await attachDocumentFile(file);
     } else {
         await attachTextFile(file);
@@ -1429,6 +1600,18 @@ async function streamAssistantReply(fetchResponsePromise) {
                         `📋 Updated the canvas: ${meta.title || CANVAS_KIND_LABELS[meta.kind] || "artifact"}`;
                     contentArea.insertBefore(pill, bubble);
                     scrollToBottom();
+                    return;
+                }
+
+                if (meta.type === "file_card") {
+                    renderFileCard(contentArea, meta);
+                    scrollToBottom();
+                    return;
+                }
+
+                if (meta.type === "image_result") {
+                    renderImageResult(contentArea, meta);
+                    scrollToBottom();
                 }
             },
             onToken: (text) => {
@@ -1533,7 +1716,8 @@ function startEditingMessage(row, group, bubble, messageId, originalContent) {
                     body: JSON.stringify({
                         message: newContent,
                         language: languagePreference,
-                        research: researchMode
+                        research: researchMode,
+                        image_aspect_ratio: imageAspectRatio
                     })
                 }
             )
@@ -1558,7 +1742,8 @@ async function regenerateLastReply() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     language: languagePreference,
-                    research: researchMode
+                    research: researchMode,
+                    image_aspect_ratio: imageAspectRatio
                 })
             }
         )
@@ -1745,7 +1930,8 @@ messageForm.addEventListener("submit", async (event) => {
                     message: outgoingMessage,
                     language: languagePreference,
                     images: outgoingImages,
-                    research: researchMode
+                    research: researchMode,
+                    image_aspect_ratio: imageAspectRatio
                 })
             }
         )
@@ -1816,6 +2002,7 @@ async function bootstrap() {
 
     await loadFeatures();
     researchToggle.hidden = !serverFeatures.research_mode;
+    imageStyleSelect.hidden = !serverFeatures.generation;
     updateMicButtonVisibility();
 
     resizeMessageInput();

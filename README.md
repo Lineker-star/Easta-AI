@@ -221,6 +221,78 @@ production traffic. Pick these up in Cursor:
   similar) is wired up, not a real current limit — the page says so
   explicitly next to the table so this isn't misleading in the
   meantime.
+- **Styled document & slide generation (PDF / DOCX / PPTX)** — a new
+  `create_document` tool (alongside `generate_document` from an
+  earlier pass, which still exists for quick Markdown drafts pushed to
+  the canvas) takes **structured** content — sections with headings,
+  paragraphs, bullet lists, and an optional table, not raw
+  Markdown/HTML — so rendering stays consistent per format:
+  - **PDF** (`reportlab`) — real typography: a colored heading
+    hierarchy, consistent margins/line-height, and a title page
+    (centered title + generated-by line, page break) once a document
+    has 3+ sections, not a monospace text dump.
+  - **DOCX** (`python-docx`) — native Word styles (Title/Heading 1/
+    Normal/List Bullet/Table Grid), so the output is editable and
+    looks like a real Word document, not manually-formatted runs.
+  - **PPTX** (`python-pptx`, new dependency) — a title slide plus one
+    slide per section, title+bullets or title+short-body, with a
+    real table shape when a section has one — never a wall of text,
+    since `sanitize_document_sections()` caps bullets/paragraphs per
+    section (tighter for pptx: 15 slides max vs. 20 sections for
+    PDF/DOCX) and clips every text field, truncating gracefully
+    (reported back to the model and, implicitly, in a shorter file)
+    rather than erroring or ballooning.
+  - **EASTA branding**: the terracotta accent
+    (`#C4693E`/`#AD5731`) on headings, table headers, and slide
+    titles across all three formats, plus Helvetica (PDF) / Calibri
+    (DOCX) instead of each library's Times-New-Roman-ish default —
+    deliberately styled without embedding custom font files (a
+    closer match to the Fraunces/Inter web fonts is a follow-up, see
+    below).
+  - Shows up in the chat as a **file card** (icon, name, format ·
+    size, download button) via a new `"file_card"` chat-UI event —
+    distinct from the canvas-panel treatment the other generation
+    tools use, since a finished report/deck is more often a one-time
+    deliverable than something to keep iterating on inline. The
+    download link is also appended (as a plain Markdown link, not
+    re-streamed as visible tokens) to the saved message so it survives
+    a reload, the same trick used for research mode's Sources list.
+  - `/api/extract-text` (and the composer's attach flow) now also
+    reads **`.pptx`** uploads (`extract_pptx_text()`, slide-by-slide
+    text and table content), alongside the existing PDF/DOCX support
+    — legacy binary `.ppt` isn't supported, only OOXML `.pptx` (same
+    constraint as `.docx`-only, not legacy `.doc`).
+  - No new feature flag — gated by the existing `EASTA_ENABLE_GENERATION`.
+- **Image generation, reworked** — `generate_image` (added in an
+  earlier pass) now renders **inline in the assistant's message** as
+  an actual picture, with a **⬇ Download** button and a **🔄
+  Regenerate** action, instead of only appearing on the canvas panel —
+  a generated image is usually a one-off result to look at and
+  download, not a draft to keep iterating on inline the way code/
+  documents are, so it no longer touches `canvas_artifacts` at all.
+  - **Style/aspect ratio**: square (1:1, default), portrait (3:4), or
+    landscape (4:3) — either the model picks one via `generate_image`'s
+    own `aspect_ratio` argument (context-dependent, e.g. "portrait"
+    for a phone wallpaper), or the user sets it ahead of time with a
+    small composer control next to Research, which pins a system hint
+    for that turn (`build_image_style_message()`, same mechanism as
+    the reply-language override) — hidden when generation is disabled,
+    same as the rest of the generation controls.
+  - **Regenerate** is a lightweight direct action
+    (`POST /api/regenerate-image`) that re-runs the same prompt/aspect
+    ratio and swaps the displayed image in place — it does *not* go
+    through the chat/tool-calling loop, so regenerating doesn't add a
+    new turn to the conversation transcript, matching how a "retry
+    this image" button behaves elsewhere.
+  - **Cost tracking**: image generation is priced per image, not per
+    token, so it never touched `MODEL_PRICING_USD_PER_MILLION_TOKENS`
+    (the token-based table used for chat calls) — it logs OpenRouter's
+    actual returned `usage.cost` from the Image API via
+    `log_direct_cost()`, with a new parallel
+    `IMAGE_GENERATION_FALLBACK_COST_USD` table as a flat-estimate
+    fallback only if that field is ever missing, so every call still
+    gets a non-zero, correctly-attributed row in `usage_logs` — not
+    silently uncounted, and not mis-costed as text tokens.
 
 ## Run locally
 
@@ -641,6 +713,13 @@ application.
 - Add email verification and a password-reset flow — registration and
   the new Account page both accept any email without confirming it's
   reachable.
+- Embed the actual Fraunces/Inter font files in `create_document`'s
+  PDF/DOCX/PPTX output for a closer visual match to the web app,
+  instead of Helvetica/Calibri stand-ins (`render_structured_pdf()` /
+  `render_structured_docx()` / `render_structured_pptx()` in
+  `backend/app.py`).
+- Add OCR-less image/chart support to `create_document`'s structured
+  sections (currently text + tables only, no embedded images).
 
 ## Tech stack
 

@@ -127,9 +127,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_user_created
 
 --
 -- generated_files
--- Backs the generate_document / generate_image tools (see
--- backend/app.py). Holds the raw bytes of a generated PDF, DOCX, or
--- image so it can be re-downloaded later via
+-- Backs the generate_document / generate_image / create_document tools
+-- (see backend/app.py). Holds the raw bytes of a generated PDF, DOCX,
+-- PPTX, or image so it can be re-downloaded later via
 -- GET /api/generated/{id}/download.
 -- NOTE: storing generated file bytes directly in Postgres is
 -- prototype-grade, same tradeoff as the messages.attachments column --
@@ -146,8 +146,16 @@ CREATE TABLE IF NOT EXISTS public.generated_files (
     mime_type character varying(120) NOT NULL,
     data bytea NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    CONSTRAINT generated_files_kind_check CHECK (((kind)::text = ANY ((ARRAY['pdf'::character varying, 'docx'::character varying, 'image'::character varying])::text[])))
+    CONSTRAINT generated_files_kind_check CHECK (((kind)::text = ANY ((ARRAY['pdf'::character varying, 'docx'::character varying, 'image'::character varying, 'pptx'::character varying])::text[])))
 );
+
+-- Widens the CHECK above to include 'pptx' for databases created
+-- before create_document/PPTX support existed. DROP+ADD of a CHECK
+-- constraint only changes what future rows are validated against --
+-- it does not touch existing data, so this is safe to re-run.
+ALTER TABLE public.generated_files DROP CONSTRAINT IF EXISTS generated_files_kind_check;
+ALTER TABLE public.generated_files ADD CONSTRAINT generated_files_kind_check
+    CHECK (((kind)::text = ANY ((ARRAY['pdf'::character varying, 'docx'::character varying, 'image'::character varying, 'pptx'::character varying])::text[])));
 
 CREATE INDEX IF NOT EXISTS idx_generated_files_user_id
     ON public.generated_files (user_id, created_at DESC);

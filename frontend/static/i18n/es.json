@@ -8,7 +8,7 @@
     "empty_title": "¿En qué puedo ayudarte hoy?",
     "empty_description": "Envía un mensaje para comenzar esta conversación.",
     "composer_placeholder": "Mensaje a EASTA...",
-    "composer_hint": "EASTA puede buscar en la web y ejecutar código cuando resulta útil, y acepta imágenes, PDF y archivos DOCX — verifica siempre la información importante.",
+    "composer_hint": "EASTA puede buscar en la web y ejecutar código cuando resulta útil, y acepta imágenes y archivos PDF, DOCX y PPTX — verifica siempre la información importante.",
     "attach_file_title": "Adjuntar un archivo",
     "send_message_aria": "Enviar mensaje",
     "thinking": "Pensando…",
@@ -17,6 +17,11 @@
     "research_toggle_label": "Investigación",
     "canvas_toggle_label": "Lienzo",
     "mic_button_title": "Entrada de voz",
+    "image_style_select_title": "Estilo de imagen para las imágenes generadas",
+    "image_style_auto": "🖼️ Auto",
+    "image_style_square": "⬜ Cuadrado",
+    "image_style_portrait": "📱 Retrato",
+    "image_style_landscape": "🖥️ Panorámico",
     "theme_toggle_dark": "Modo oscuro",
     "theme_toggle_light": "Modo claro"
 }

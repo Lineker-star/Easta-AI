@@ -18,25 +18,33 @@ import requests
 from bs4 import BeautifulSoup
 from docx import Document as DocxDocument
 from docx.shared import Pt
+from docx.shared import RGBColor as DocxRGBColor
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from openai import OpenAI
+from pptx import Presentation
+from pptx.dml.color import RGBColor as PptxRGBColor
+from pptx.util import Inches as PptxInches
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Json
 from pydantic import BaseModel
 from pypdf import PdfReader
+from reportlab.lib import colors as reportlab_colors
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
     ListFlowable,
     ListItem,
+    PageBreak,
     Paragraph,
     Preformatted,
     SimpleDocTemplate,
     Spacer,
+    Table,
+    TableStyle,
 )
 from starlette.middleware.sessions import SessionMiddleware
 from werkzeug.security import (
@@ -273,11 +281,16 @@ class MessageRequest(BaseModel):
     images: list[ImageAttachment] = []
     # Research mode toggle from the composer — see run_research().
     research: bool = False
+    # Composer image-style control (a key from IMAGE_ASPECT_RATIOS,
+    # e.g. "portrait"), or "auto"/omitted to let the model choose via
+    # generate_image's own aspect_ratio argument.
+    image_aspect_ratio: str | None = None
 
 
 class RegenerateRequest(BaseModel):
     language: str | None = None
     research: bool = False
+    image_aspect_ratio: str | None = None
 
 
 class DocumentRequest(BaseModel):
@@ -292,6 +305,12 @@ class SpeakRequest(BaseModel):
     # but accepted so the client can send it once per-language voice
     # selection is worth adding (see README "Suggested next steps").
     language: str | None = None
+
+
+class RegenerateImageRequest(BaseModel):
+    prompt: str
+    aspect_ratio: str | None = None
+    conversation_id: int | None = None
 
 
 def require_user(request: Request) -> int:
@@ -1166,10 +1185,12 @@ def execute_tool(
     user_id: int | None = None,
     conversation_id: int | None = None,
 ) -> tuple[str, dict | None]:
-    """Returns (result_text, canvas_event). result_text is fed back to
-    the model as the tool's output; canvas_event (or None) is an extra
-    event surfaced to the chat UI when the tool updated the canvas side
-    panel (see the "Generation" section below)."""
+    """Returns (result_text, ui_event). result_text is fed back to the
+    model as the tool's output; ui_event (or None) is an extra event
+    surfaced to the chat UI -- either a canvas-panel update
+    ({"type": "canvas", ...}) or a chat file card
+    ({"type": "file_card", ...}) -- see the "Generation" section
+    below."""
     try:
         if name == "web_search":
             return tool_web_search(args.get("query", "")), None
@@ -1185,6 +1206,9 @@ def execute_tool(
 
         if name == "write_code" and ENABLE_GENERATION:
             return tool_write_code(args, user_id, conversation_id)
+
+        if name == "create_document" and ENABLE_GENERATION:
+            return tool_create_document(args, user_id, conversation_id)
 
         return f"Unknown tool '{name}'.", None
 
@@ -1590,18 +1614,38 @@ def render_markdown_to_docx(title: str, markdown_body: str) -> bytes:
     return buffer.getvalue()
 
 
-def generate_image_bytes(prompt: str) -> tuple[bytes, str, float]:
+# Composer-facing aspect ratio labels -> OpenRouter Image API's
+# `aspect_ratio` values (confirmed via OpenRouter's docs: it accepts
+# ratio strings like "1:1"/"16:9"/"9:16"/"4:3"/"3:4"/"auto", and support
+# can vary by model -- re-check https://openrouter.ai/docs if you swap
+# EASTA_IMAGE_MODEL for something that doesn't take this parameter).
+IMAGE_ASPECT_RATIOS = {
+    "square": "1:1",
+    "portrait": "3:4",
+    "landscape": "4:3",
+}
+
+
+def generate_image_bytes(
+    prompt: str, aspect_ratio: str | None = None
+) -> tuple[bytes, str, float]:
     """Calls OpenRouter's dedicated Image API (POST /api/v1/images --
     distinct from the chat completions endpoint used everywhere else in
     this file). Returns (image_bytes, mime_type, cost_usd). Raises on
     failure; callers turn that into a user-facing tool error message."""
+    request_body = {"model": IMAGE_MODEL, "prompt": prompt}
+
+    ratio_value = IMAGE_ASPECT_RATIOS.get(aspect_ratio)
+    if ratio_value:
+        request_body["aspect_ratio"] = ratio_value
+
     response = requests.post(
         "https://openrouter.ai/api/v1/images",
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={"model": IMAGE_MODEL, "prompt": prompt},
+        json=request_body,
         timeout=90,
     )
     response.raise_for_status()
@@ -1616,6 +1660,16 @@ def generate_image_bytes(prompt: str) -> tuple[bytes, str, float]:
     image_bytes = base64.b64decode(first["b64_json"])
     mime_type = first.get("media_type", "image/png")
     cost_usd = float((payload.get("usage") or {}).get("cost", 0) or 0)
+
+    if not cost_usd:
+        # The dedicated Image API normally reports a real per-call
+        # cost in usage.cost (confirmed against the live endpoint) --
+        # this is a rough fallback estimate only, so a usage_logs row
+        # still gets a non-zero, non-token-based cost if that field is
+        # ever missing. Reconcile against your OpenRouter invoice.
+        cost_usd = IMAGE_GENERATION_FALLBACK_COST_USD.get(
+            IMAGE_MODEL, DEFAULT_IMAGE_GENERATION_FALLBACK_COST_USD
+        )
 
     return image_bytes, mime_type, cost_usd
 
@@ -1745,13 +1799,12 @@ GENERATION_TOOLS = [
         "function": {
             "name": "generate_image",
             "description": (
-                "Generate an image from a text description and show "
-                "it on the canvas side panel -- use only when the "
-                "user explicitly asks for an image/picture/logo/"
+                "Generate an image from a text description, shown "
+                "inline in your reply with a download button and a "
+                "regenerate action -- use only when the user "
+                "explicitly asks for an image/picture/logo/"
                 "illustration to be created, not for finding existing "
-                "images (use web_search for that). Call again with an "
-                "updated prompt to revise an image already on the "
-                "canvas."
+                "images (use web_search for that)."
             ),
             "parameters": {
                 "type": "object",
@@ -1759,6 +1812,17 @@ GENERATION_TOOLS = [
                     "prompt": {
                         "type": "string",
                         "description": "A detailed description of the image to generate.",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "enum": ["square", "portrait", "landscape"],
+                        "description": (
+                            "Image shape. Default to 'square' unless "
+                            "the request clearly calls for something "
+                            "else (e.g. a phone wallpaper -> "
+                            "'portrait', a banner/wide scene -> "
+                            "'landscape')."
+                        ),
                     },
                 },
                 "required": ["prompt"],
@@ -1798,6 +1862,95 @@ GENERATION_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_document",
+            "description": (
+                "Create a polished, downloadable PDF, DOCX, or PPTX "
+                "file from structured content (sections with headings, "
+                "paragraphs, bullet lists, and/or a table) -- use this "
+                "instead of generate_document when the user wants a "
+                "finished, well-typeset deliverable (a report, a slide "
+                "deck, a document with real tables) rather than "
+                "something to keep iterating on in the canvas. Shows "
+                "up in the chat as a downloadable file card. Do not "
+                "paste the content in your reply -- just briefly "
+                "confirm what you made."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "enum": ["pdf", "docx", "pptx"],
+                        "description": (
+                            "pptx produces a title slide plus one "
+                            "slide per section."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Document/deck title, used as the "
+                            "filename and title page/slide."
+                        ),
+                    },
+                    "sections": {
+                        "type": "array",
+                        "description": (
+                            "Content sections, in order. For pptx "
+                            "each section becomes one slide -- keep "
+                            "bullets short and few per section for "
+                            "slides."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "heading": {
+                                    "type": "string",
+                                    "description": "Section heading / slide title.",
+                                },
+                                "paragraphs": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "Body paragraphs (omit for a "
+                                        "bullet-only or table-only "
+                                        "section)."
+                                    ),
+                                },
+                                "bullets": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Bullet points.",
+                                },
+                                "table": {
+                                    "type": "object",
+                                    "description": "An optional table for this section.",
+                                    "properties": {
+                                        "headers": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "rows": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            "required": ["heading"],
+                        },
+                    },
+                },
+                "required": ["format", "title", "sections"],
+            },
+        },
+    },
 ]
 
 
@@ -1828,10 +1981,7 @@ def tool_generate_document(
         mime_type = "application/pdf"
     else:
         file_bytes = render_markdown_to_docx(title, markdown_body)
-        mime_type = (
-            "application/vnd.openxmlformats-officedocument"
-            ".wordprocessingml.document"
-        )
+        mime_type = DOCX_MIME_TYPE
 
     file_id = save_generated_file(
         user_id, conversation_id, title, file_format, mime_type, file_bytes
@@ -1871,42 +2021,41 @@ def tool_generate_image(
     if not prompt:
         return "No image prompt was provided.", None
 
-    image_bytes, mime_type, cost_usd = generate_image_bytes(prompt)
+    aspect_ratio = args.get("aspect_ratio")
+    if aspect_ratio not in IMAGE_ASPECT_RATIOS:
+        aspect_ratio = "square"
+
+    image_bytes, mime_type, cost_usd = generate_image_bytes(prompt, aspect_ratio)
 
     title = prompt[:150]
     file_id = save_generated_file(
         user_id, conversation_id, title, "image", mime_type, image_bytes
     )
-    upsert_canvas_artifact(
-        conversation_id,
-        title=title,
-        kind="image",
-        content=prompt,
-        generated_file_id=file_id,
-    )
 
-    if cost_usd:
-        try:
-            log_direct_cost(user_id, conversation_id, IMAGE_MODEL, cost_usd)
-        except Exception as error:  # noqa: BLE001 - best-effort
-            print(f"EASTA: image-generation cost logging failed: {error!r}")
+    # Always logged, even if generate_image_bytes() had to fall back to
+    # an estimated cost -- every generation call should show up in
+    # /usage, not just the ones with a nonzero real cost.
+    try:
+        log_direct_cost(user_id, conversation_id, IMAGE_MODEL, cost_usd)
+    except Exception as error:  # noqa: BLE001 - best-effort
+        print(f"EASTA: image-generation cost logging failed: {error!r}")
 
     result_text = (
-        f"Generated an image for: \"{prompt}\" and placed it on the "
-        "canvas panel. Do not describe it in detail unless asked -- "
-        "just briefly confirm what you made."
+        f"Generated an image for: \"{prompt}\" ({aspect_ratio}) and "
+        "shown it inline in the chat with a download button and a "
+        "regenerate action. Do not describe it in detail unless "
+        "asked -- just briefly confirm what you made."
     )
 
-    canvas_event = {
-        "type": "canvas",
-        "title": title,
-        "kind": "image",
-        "language": None,
-        "content": None,
+    ui_event = {
+        "type": "image_result",
+        "id": file_id,
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
         "download_url": f"/api/generated/{file_id}/download",
     }
 
-    return result_text, canvas_event
+    return result_text, ui_event
 
 
 def tool_write_code(
@@ -1943,6 +2092,496 @@ def tool_write_code(
     }
 
     return result_text, canvas_event
+
+
+# --- create_document: styled PDF / DOCX / PPTX from structured content ------
+# A more capable sibling of generate_document above: instead of a Markdown
+# blob, the model sends structured sections (heading, paragraphs, bullets,
+# an optional table), rendered with real typography/native styles per
+# format and shown in the chat as a downloadable file card (not pushed to
+# the canvas -- this is meant as a finished deliverable, not a draft to
+# keep iterating on).
+
+DOCX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+PPTX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument"
+    ".presentationml.presentation"
+)
+
+# Terracotta brand accent, matching frontend/static/styles.css's
+# --color-accent (#C4693E) / --color-accent-hover (#AD5731) / muted text
+# (#6F6558). Kept in sync manually -- reportlab, python-docx, and
+# python-pptx each have their own incompatible RGB color type.
+_ACCENT_HEX = "C4693E"
+_ACCENT_DARK_HEX = "AD5731"
+_MUTED_HEX = "6F6558"
+
+PDF_ACCENT = reportlab_colors.HexColor(f"#{_ACCENT_HEX}")
+PDF_ACCENT_DARK = reportlab_colors.HexColor(f"#{_ACCENT_DARK_HEX}")
+PDF_MUTED = reportlab_colors.HexColor(f"#{_MUTED_HEX}")
+PDF_BORDER = reportlab_colors.HexColor("#D8CBAF")
+
+DOCX_ACCENT = DocxRGBColor.from_string(_ACCENT_HEX)
+DOCX_ACCENT_DARK = DocxRGBColor.from_string(_ACCENT_DARK_HEX)
+DOCX_MUTED = DocxRGBColor.from_string(_MUTED_HEX)
+
+PPTX_ACCENT = PptxRGBColor.from_string(_ACCENT_HEX)
+PPTX_ACCENT_DARK = PptxRGBColor.from_string(_ACCENT_DARK_HEX)
+PPTX_WHITE = PptxRGBColor.from_string("FFFFFF")
+
+# Keeps a single request from producing an oversized file -- sections/
+# slides beyond the cap are dropped (truncated=True is reported back to
+# the model and the caller), and every text field is clipped.
+MAX_DOCUMENT_SECTIONS = 20
+MAX_PPTX_SECTIONS = 15
+MAX_PARAGRAPHS_PER_SECTION = 6
+MAX_BULLETS_PER_SECTION = 10
+MAX_TABLE_ROWS = 25
+MAX_TABLE_COLUMNS = 8
+MAX_HEADING_CHARS = 150
+MAX_PARAGRAPH_CHARS = 1000
+MAX_BULLET_CHARS = 300
+MAX_TABLE_CELL_CHARS = 200
+
+
+def _clip(text, limit: int) -> str:
+    return str(text or "").strip()[:limit]
+
+
+def sanitize_document_sections(raw_sections, document_format: str):
+    """Validates and clamps a create_document tool call's `sections`
+    payload to the limits above. Returns (sections, truncated) -- a
+    section/list that's too long is cut, not rejected, so the model
+    still gets a usable (if smaller) document back."""
+    section_limit = (
+        MAX_PPTX_SECTIONS if document_format == "pptx" else MAX_DOCUMENT_SECTIONS
+    )
+
+    if not isinstance(raw_sections, list):
+        return [], False
+
+    truncated = len(raw_sections) > section_limit
+    sections = []
+
+    for raw_section in raw_sections[:section_limit]:
+        if not isinstance(raw_section, dict):
+            continue
+
+        heading = _clip(raw_section.get("heading"), MAX_HEADING_CHARS)
+
+        raw_paragraphs = raw_section.get("paragraphs") or []
+        if len(raw_paragraphs) > MAX_PARAGRAPHS_PER_SECTION:
+            truncated = True
+        paragraphs = [
+            _clip(p, MAX_PARAGRAPH_CHARS)
+            for p in raw_paragraphs[:MAX_PARAGRAPHS_PER_SECTION]
+            if str(p or "").strip()
+        ]
+
+        raw_bullets = raw_section.get("bullets") or []
+        if len(raw_bullets) > MAX_BULLETS_PER_SECTION:
+            truncated = True
+        bullets = [
+            _clip(b, MAX_BULLET_CHARS)
+            for b in raw_bullets[:MAX_BULLETS_PER_SECTION]
+            if str(b or "").strip()
+        ]
+
+        table = None
+        raw_table = raw_section.get("table")
+
+        if isinstance(raw_table, dict):
+            raw_headers = raw_table.get("headers") or []
+            raw_rows = raw_table.get("rows") or []
+
+            if len(raw_headers) > MAX_TABLE_COLUMNS or len(raw_rows) > MAX_TABLE_ROWS:
+                truncated = True
+
+            headers = [
+                _clip(h, MAX_TABLE_CELL_CHARS)
+                for h in raw_headers[:MAX_TABLE_COLUMNS]
+            ]
+            rows = [
+                [
+                    _clip(cell, MAX_TABLE_CELL_CHARS)
+                    for cell in row[:MAX_TABLE_COLUMNS]
+                ]
+                for row in raw_rows[:MAX_TABLE_ROWS]
+                if isinstance(row, list)
+            ]
+
+            if headers or rows:
+                table = {"headers": headers, "rows": rows}
+
+        if not heading and not paragraphs and not bullets and not table:
+            continue
+
+        sections.append({
+            "heading": heading or "Untitled section",
+            "paragraphs": paragraphs,
+            "bullets": bullets,
+            "table": table,
+        })
+
+    return sections, truncated
+
+
+def _build_pdf_table(table: dict):
+    headers = table.get("headers") or []
+    rows = table.get("rows") or []
+
+    data = ([headers] if headers else []) + rows
+
+    if not data:
+        return Spacer(1, 0)
+
+    pdf_table = Table(data, hAlign="LEFT")
+
+    style_commands = [
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, PDF_BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]
+
+    if headers:
+        style_commands += [
+            ("BACKGROUND", (0, 0), (-1, 0), PDF_ACCENT),
+            ("TEXTCOLOR", (0, 0), (-1, 0), reportlab_colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ]
+
+    pdf_table.setStyle(TableStyle(style_commands))
+    return pdf_table
+
+
+def render_structured_pdf(title: str, sections: list[dict]) -> bytes:
+    """Real typography, not a monospace dump: a title page for longer
+    documents, a colored heading hierarchy, and styled tables --
+    EASTA's terracotta accent on headings/table headers, Helvetica
+    instead of the reportlab default Times-Roman."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=LETTER,
+        topMargin=1 * inch,
+        bottomMargin=1 * inch,
+        leftMargin=1 * inch,
+        rightMargin=1 * inch,
+        title=title,
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "EastaTitle", parent=styles["Title"],
+        fontName="Helvetica-Bold", fontSize=26, leading=32,
+        textColor=PDF_ACCENT_DARK,
+    )
+    subtitle_style = ParagraphStyle(
+        "EastaSubtitle", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=11, leading=15,
+        textColor=PDF_MUTED, alignment=1,
+    )
+    heading_style = ParagraphStyle(
+        "EastaHeading1", parent=styles["Heading1"],
+        fontName="Helvetica-Bold", fontSize=16, leading=20,
+        textColor=PDF_ACCENT, spaceBefore=16, spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "EastaBody", parent=styles["BodyText"],
+        fontName="Helvetica", fontSize=10.5, leading=15.5,
+        spaceAfter=8,
+    )
+    bullet_style = ParagraphStyle("EastaBullet", parent=body_style, leftIndent=6)
+
+    story = []
+    use_title_page = len(sections) >= 3
+
+    if use_title_page:
+        story.append(Spacer(1, 2.2 * inch))
+        story.append(Paragraph(_markdown_inline_to_reportlab(title), title_style))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(
+            f"Generated by EASTA &middot; {datetime.now():%B %d, %Y}",
+            subtitle_style,
+        ))
+        story.append(PageBreak())
+    else:
+        story.append(Paragraph(_markdown_inline_to_reportlab(title), title_style))
+        story.append(Spacer(1, 14))
+
+    for section in sections:
+        story.append(Paragraph(
+            _markdown_inline_to_reportlab(section.get("heading", "")),
+            heading_style,
+        ))
+
+        for paragraph_text in section.get("paragraphs") or []:
+            story.append(Paragraph(
+                _markdown_inline_to_reportlab(paragraph_text), body_style
+            ))
+
+        bullets = section.get("bullets") or []
+        if bullets:
+            story.append(ListFlowable(
+                [
+                    ListItem(Paragraph(_markdown_inline_to_reportlab(b), bullet_style))
+                    for b in bullets
+                ],
+                bulletType="bullet",
+            ))
+            story.append(Spacer(1, 6))
+
+        table = section.get("table")
+        if table:
+            story.append(_build_pdf_table(table))
+            story.append(Spacer(1, 10))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def _color_docx_runs(paragraph, rgb: DocxRGBColor):
+    for run in paragraph.runs:
+        run.font.color.rgb = rgb
+
+
+def _add_docx_table(document, table: dict):
+    headers = table.get("headers") or []
+    rows = table.get("rows") or []
+
+    column_count = len(headers) if headers else (len(rows[0]) if rows else 0)
+    if column_count == 0:
+        return
+
+    total_rows = (1 if headers else 0) + len(rows)
+    docx_table = document.add_table(rows=total_rows, cols=column_count)
+    docx_table.style = "Table Grid"
+
+    row_index = 0
+    if headers:
+        for col_index, header_text in enumerate(headers):
+            cell = docx_table.cell(0, col_index)
+            run = cell.paragraphs[0].add_run(header_text)
+            run.bold = True
+            run.font.color.rgb = DOCX_ACCENT
+        row_index = 1
+
+    for row in rows:
+        for col_index in range(column_count):
+            value = row[col_index] if col_index < len(row) else ""
+            docx_table.cell(row_index, col_index).text = str(value)
+        row_index += 1
+
+    document.add_paragraph()
+
+
+def render_structured_docx(title: str, sections: list[dict]) -> bytes:
+    """Uses native Word styles (Title/Heading 1/List Bullet/Table Grid)
+    so the output is editable and looks like a real Word document, not
+    manually-formatted runs -- with EASTA's terracotta on headings and
+    a page break before the body for longer documents."""
+    document = DocxDocument()
+
+    normal_style = document.styles["Normal"]
+    normal_style.font.name = "Calibri"
+    normal_style.font.size = Pt(11)
+
+    title_paragraph = document.add_heading(title, level=0)
+    _color_docx_runs(title_paragraph, DOCX_ACCENT_DARK)
+
+    if len(sections) >= 3:
+        subtitle = document.add_paragraph(
+            f"Generated by EASTA · {datetime.now():%B %d, %Y}"
+        )
+        subtitle.runs[0].font.size = Pt(10)
+        subtitle.runs[0].font.color.rgb = DOCX_MUTED
+        document.add_page_break()
+
+    for section in sections:
+        heading_paragraph = document.add_heading(
+            section.get("heading", ""), level=1
+        )
+        _color_docx_runs(heading_paragraph, DOCX_ACCENT)
+
+        for paragraph_text in section.get("paragraphs") or []:
+            _add_markdown_runs(document.add_paragraph(), paragraph_text)
+
+        for bullet_text in section.get("bullets") or []:
+            _add_markdown_runs(
+                document.add_paragraph(style="List Bullet"), bullet_text
+            )
+
+        table = section.get("table")
+        if table:
+            _add_docx_table(document, table)
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _add_pptx_table(slide, table: dict):
+    headers = table.get("headers") or []
+    rows = table.get("rows") or []
+
+    column_count = len(headers) if headers else (len(rows[0]) if rows else 0)
+    if column_count == 0:
+        return
+
+    row_count = min((1 if headers else 0) + len(rows), 9)
+
+    graphic_frame = slide.shapes.add_table(
+        row_count, column_count,
+        PptxInches(0.6), PptxInches(1.8), PptxInches(9.0), PptxInches(0.5 * row_count),
+    )
+    pptx_table = graphic_frame.table
+
+    row_index = 0
+    if headers:
+        for col_index, header_text in enumerate(headers[:column_count]):
+            cell = pptx_table.cell(0, col_index)
+            cell.text = header_text
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = PPTX_ACCENT
+            for paragraph in cell.text_frame.paragraphs:
+                paragraph.font.bold = True
+                paragraph.font.color.rgb = PPTX_WHITE
+        row_index = 1
+
+    for row in rows:
+        if row_index >= row_count:
+            break
+        for col_index in range(column_count):
+            value = row[col_index] if col_index < len(row) else ""
+            pptx_table.cell(row_index, col_index).text = str(value)
+        row_index += 1
+
+
+def render_structured_pptx(title: str, sections: list[dict]) -> bytes:
+    """One slide per section on a simple, consistent title+content
+    layout (never walls of text -- bullets/paragraphs are already
+    clamped short by sanitize_document_sections), plus a title slide.
+    EASTA's terracotta on every slide title."""
+    presentation = Presentation()
+
+    title_slide = presentation.slides.add_slide(presentation.slide_layouts[0])
+    title_slide.shapes.title.text = title
+    title_paragraph = title_slide.shapes.title.text_frame.paragraphs[0]
+    title_paragraph.font.bold = True
+    title_paragraph.font.color.rgb = PPTX_ACCENT_DARK
+
+    if len(title_slide.placeholders) > 1:
+        title_slide.placeholders[1].text = (
+            f"Generated by EASTA · {datetime.now():%B %d, %Y}"
+        )
+
+    content_layout = presentation.slide_layouts[1]
+
+    for section in sections:
+        slide = presentation.slides.add_slide(content_layout)
+        slide.shapes.title.text = section.get("heading", "")
+        title_run = slide.shapes.title.text_frame.paragraphs[0]
+        title_run.font.bold = True
+        title_run.font.color.rgb = PPTX_ACCENT
+
+        body_placeholder = None
+        for placeholder in slide.placeholders:
+            if placeholder.placeholder_format.idx != 0:
+                body_placeholder = placeholder
+                break
+
+        table = section.get("table")
+        bullets = section.get("bullets") or []
+        paragraphs = section.get("paragraphs") or []
+
+        if table:
+            _add_pptx_table(slide, table)
+        elif bullets and body_placeholder:
+            text_frame = body_placeholder.text_frame
+            text_frame.clear()
+            for index, bullet_text in enumerate(bullets[:6]):
+                paragraph = (
+                    text_frame.paragraphs[0] if index == 0
+                    else text_frame.add_paragraph()
+                )
+                paragraph.text = _clip(bullet_text, 200)
+        elif paragraphs and body_placeholder:
+            text_frame = body_placeholder.text_frame
+            text_frame.clear()
+            for index, paragraph_text in enumerate(paragraphs[:3]):
+                paragraph = (
+                    text_frame.paragraphs[0] if index == 0
+                    else text_frame.add_paragraph()
+                )
+                paragraph.text = _clip(paragraph_text, 300)
+
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def tool_create_document(
+    args: dict, user_id: int, conversation_id: int
+) -> tuple[str, dict | None]:
+    document_format = (args.get("format") or "pdf").strip().lower()
+
+    if document_format not in ("pdf", "docx", "pptx"):
+        return (
+            f"Unsupported format '{document_format}'. "
+            "Use 'pdf', 'docx', or 'pptx'.",
+            None,
+        )
+
+    title = (args.get("title") or "Document").strip()[:150] or "Document"
+    sections, truncated = sanitize_document_sections(
+        args.get("sections"), document_format
+    )
+
+    if not sections:
+        return "No document content was provided.", None
+
+    if document_format == "pdf":
+        file_bytes = render_structured_pdf(title, sections)
+        mime_type = "application/pdf"
+    elif document_format == "docx":
+        file_bytes = render_structured_docx(title, sections)
+        mime_type = DOCX_MIME_TYPE
+    else:
+        file_bytes = render_structured_pptx(title, sections)
+        mime_type = PPTX_MIME_TYPE
+
+    file_id = save_generated_file(
+        user_id, conversation_id, title, document_format, mime_type, file_bytes
+    )
+
+    section_word = "section" if len(sections) == 1 else "sections"
+    result_text = (
+        f"Created a {document_format.upper()} titled \"{title}\" "
+        f"({len(sections)} {section_word}"
+        + (", truncated to fit length limits" if truncated else "")
+        + "). It has been shown to the user as a downloadable file "
+        "card -- do not repeat its contents in your reply, just "
+        "briefly confirm what you made."
+    )
+
+    ui_event = {
+        "type": "file_card",
+        "id": file_id,
+        "title": title,
+        "format": document_format,
+        "size_bytes": len(file_bytes),
+        "download_url": f"/api/generated/{file_id}/download",
+    }
+
+    return result_text, ui_event
 
 
 def build_canvas_context_message(conversation_id: int):
@@ -2071,16 +2710,19 @@ def build_message_content(text: str, attachments: list[dict] | None):
     return parts
 
 
-# --- Multimodal: PDF / DOCX text extraction ---------------------------------
+# --- Multimodal: PDF / DOCX / PPTX text extraction --------------------------
 # Extracts plain text server-side so it can be inlined into the message the
 # same way the existing client-side .txt attach flow already works (see
 # buildOutgoingMessage() in chat.js) — no separate storage/retrieval path
 # needed. Scanned/image-only PDFs have no extractable text layer; this
 # intentionally does not attempt OCR (see README "Suggested next steps").
+# Legacy binary .ppt (pre-2007) isn't supported -- python-pptx only reads
+# the OOXML .pptx format, same as python-docx only reads .docx not .doc.
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 MAX_EXTRACTED_CHARS = 20_000
 MAX_PDF_PAGES = 50
+MAX_PPTX_SLIDES_TO_READ = 50
 
 TRUNCATION_MARKER = "\n\n[... (truncated) ...]"
 
@@ -2119,6 +2761,42 @@ def extract_docx_text(data: bytes) -> tuple[str, bool]:
     text = "\n".join(paragraphs)
 
     return truncate_extracted_text(text)
+
+
+def extract_pptx_text(data: bytes) -> tuple[str, bool]:
+    presentation = Presentation(io.BytesIO(data))
+    total_slides = len(presentation.slides)
+    truncated_by_slides = total_slides > MAX_PPTX_SLIDES_TO_READ
+
+    parts = []
+
+    for slide_index, slide in enumerate(presentation.slides):
+        if slide_index >= MAX_PPTX_SLIDES_TO_READ:
+            break
+
+        slide_lines = []
+
+        for shape in slide.shapes:
+            try:
+                if shape.has_text_frame and shape.text_frame.text.strip():
+                    slide_lines.append(shape.text_frame.text.strip())
+                elif shape.has_table:
+                    for row in shape.table.rows:
+                        row_text = " | ".join(
+                            cell.text for cell in row.cells
+                        )
+                        if row_text.strip():
+                            slide_lines.append(row_text)
+            except Exception:  # noqa: BLE001 - a single bad shape shouldn't fail the upload
+                continue
+
+        if slide_lines:
+            parts.append(f"[Slide {slide_index + 1}]\n" + "\n".join(slide_lines))
+
+    text = "\n\n".join(parts)
+    text, truncated_by_length = truncate_extracted_text(text)
+
+    return text, (truncated_by_slides or truncated_by_length)
 
 
 # --- Context summarization --------------------------------------------------
@@ -2222,6 +2900,25 @@ def build_language_override_message(language_code: str | None):
     }
 
 
+def build_image_style_message(aspect_ratio: str | None):
+    """Pins a composer-chosen image aspect ratio into the system
+    context for a single turn, as an alternative to the model picking
+    one via the generate_image tool's own aspect_ratio argument.
+    Returns None for "auto"/missing/unrecognized values."""
+    if not aspect_ratio or aspect_ratio not in IMAGE_ASPECT_RATIOS:
+        return None
+
+    return {
+        "role": "system",
+        "content": (
+            f"If you call generate_image this turn, use aspect_ratio: "
+            f"\"{aspect_ratio}\" (the user selected this in the "
+            "composer) unless they've explicitly asked for a "
+            "different shape in their message."
+        ),
+    }
+
+
 def build_llm_context(
     conversation_id: int,
     conversation_row,
@@ -2229,6 +2926,7 @@ def build_llm_context(
     language_message=None,
     research_message=None,
     canvas_message=None,
+    image_style_message=None,
 ):
     _id, _title, _created_at, summary, summarized_through = (
         conversation_row
@@ -2264,6 +2962,9 @@ def build_llm_context(
     if canvas_message:
         context.append(canvas_message)
 
+    if image_style_message:
+        context.append(image_style_message)
+
     # Placed last among the system messages (closest to the actual
     # turns) so it has the strongest pull on the reply's language.
     if language_message:
@@ -2291,6 +2992,18 @@ MODEL_PRICING_USD_PER_MILLION_TOKENS = {
     "google/gemini-3.8-flash": (0.75, 3.75),
 }
 DEFAULT_PRICING_USD_PER_MILLION_TOKENS = (0.50, 1.50)
+
+# Image generation is priced per image, not per token -- mis-costing it
+# through the per-million-token table above would be wrong even as an
+# estimate, so it gets its own parallel table. In practice
+# generate_image_bytes() logs OpenRouter's actual returned cost
+# (usage.cost from POST /api/v1/images) and only falls back to this
+# flat estimate if that field is ever missing/zero. Same caveat as
+# above: illustrative, re-check https://openrouter.ai/models.
+IMAGE_GENERATION_FALLBACK_COST_USD = {
+    "google/gemini-2.5-flash-image": 0.02,
+}
+DEFAULT_IMAGE_GENERATION_FALLBACK_COST_USD = 0.02
 
 
 def log_usage(
@@ -2476,6 +3189,7 @@ def build_streaming_response(
     user_id: int,
     language: str | None = None,
     research: bool = False,
+    image_aspect_ratio: str | None = None,
 ):
     conversation = get_conversation(conversation_id, user_id)
 
@@ -2522,6 +3236,7 @@ def build_streaming_response(
         rag_message = build_rag_system_message(latest_user_text, user_id)
         language_message = build_language_override_message(language)
         canvas_message = build_canvas_context_message(conversation_id)
+        image_style_message = build_image_style_message(image_aspect_ratio)
 
         llm_context = build_llm_context(
             conversation_id,
@@ -2530,6 +3245,7 @@ def build_streaming_response(
             language_message,
             research_message,
             canvas_message,
+            image_style_message,
         )
 
         models_to_try = (
@@ -2567,6 +3283,37 @@ def build_streaming_response(
                     elif kind == "canvas":
                         marker = json.dumps(payload)
                         yield f"\u241f{marker}\u241f"
+
+                        if payload.get("type") == "file_card":
+                            # Persisted (not streamed as visible tokens
+                            # -- the live view already showed the
+                            # styled file card above) so the download
+                            # link survives a reload, same pattern as
+                            # research mode's Sources list.
+                            extension = {
+                                "pdf": ".pdf",
+                                "docx": ".docx",
+                                "pptx": ".pptx",
+                            }.get(payload.get("format"), "")
+                            complete_response += (
+                                f"\n\n\ud83d\udcc4 [Download "
+                                f"{payload['title']}{extension}]"
+                                f"({payload['download_url']})"
+                            )
+
+                        elif payload.get("type") == "image_result":
+                            # Persisted as an actual Markdown image, so
+                            # a reload shows the same inline picture
+                            # (not just a link) via the normal
+                            # markdown-rendering pipeline. The
+                            # download route is safe to hotlink here --
+                            # same cross-origin cookie reasoning as the
+                            # canvas panel's <img> (see renderCanvas()
+                            # in chat.js).
+                            complete_response += (
+                                f"\n\n![{payload['prompt']}]"
+                                f"({payload['download_url']})"
+                            )
 
                     elif kind == "token":
                         complete_response += payload
@@ -3077,7 +3824,11 @@ def stream_message(
     rename_conversation_if_default(conversation_id, user_message)
 
     return build_streaming_response(
-        conversation_id, user_id, data.language, data.research
+        conversation_id,
+        user_id,
+        data.language,
+        data.research,
+        data.image_aspect_ratio,
     )
 
 
@@ -3132,7 +3883,11 @@ def edit_message(
     rename_conversation_if_default(conversation_id, new_content)
 
     return build_streaming_response(
-        conversation_id, user_id, data.language, data.research
+        conversation_id,
+        user_id,
+        data.language,
+        data.research,
+        data.image_aspect_ratio,
     )
 
 
@@ -3170,22 +3925,28 @@ def regenerate_last(
         delete_messages_from(conversation_id, last_id)
 
     return build_streaming_response(
-        conversation_id, user_id, data.language, data.research
+        conversation_id,
+        user_id,
+        data.language,
+        data.research,
+        data.image_aspect_ratio,
     )
 
 
-# --- Routes: attachments (PDF / DOCX text extraction) -----------------------
+# --- Routes: attachments (PDF / DOCX / PPTX text extraction) ----------------
 
 @app.post("/api/extract-text")
 async def extract_text(
     request: Request,
     file: UploadFile = File(...),
 ):
-    """Extracts plain text from an uploaded PDF or DOCX file so the
-    client can inline it into a message, the same way it already does
-    for plain-text files. See extract_pdf_text() / extract_docx_text()
-    for limits — scanned/image-only PDFs have no text layer to extract
-    (OCR is a follow-up, not handled here)."""
+    """Extracts plain text from an uploaded PDF, DOCX, or PPTX file so
+    the client can inline it into a message, the same way it already
+    does for plain-text files. See extract_pdf_text() /
+    extract_docx_text() / extract_pptx_text() for limits — scanned/
+    image-only PDFs have no text layer to extract (OCR is a follow-up,
+    not handled here), and legacy binary .ppt isn't supported (only
+    OOXML .pptx)."""
     user_id = require_user(request)
 
     enforce_rate_limit(user_id)
@@ -3193,10 +3954,10 @@ async def extract_text(
     filename = file.filename or "document"
     suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
-    if suffix not in ("pdf", "docx"):
+    if suffix not in ("pdf", "docx", "pptx"):
         raise HTTPException(
             status_code=400,
-            detail="Only PDF and DOCX files are supported.",
+            detail="Only PDF, DOCX, and PPTX files are supported.",
         )
 
     data = await file.read()
@@ -3210,8 +3971,10 @@ async def extract_text(
     try:
         if suffix == "pdf":
             text, truncated = extract_pdf_text(data)
-        else:
+        elif suffix == "docx":
             text, truncated = extract_docx_text(data)
+        else:
+            text, truncated = extract_pptx_text(data)
 
     except Exception as error:
         raise HTTPException(
@@ -3264,6 +4027,60 @@ def download_generated_file(file_id: int, request: Request):
             ),
         },
     )
+
+
+@app.post("/api/regenerate-image")
+def regenerate_image(data: RegenerateImageRequest, request: Request):
+    """Backs each inline image result's "Regenerate" button -- a
+    lightweight direct re-run of the same prompt (optionally a new
+    aspect ratio), independent of the chat/tool-calling loop, so
+    regenerating doesn't add a new turn to the conversation transcript.
+    Returns a new generated_files row; the client swaps the displayed
+    image in place."""
+    user_id = require_user(request)
+
+    enforce_rate_limit(user_id)
+
+    if not ENABLE_GENERATION:
+        raise HTTPException(
+            status_code=403,
+            detail="Image generation is disabled.",
+        )
+
+    prompt = (data.prompt or "").strip()
+
+    if not prompt:
+        raise HTTPException(
+            status_code=400,
+            detail="No image prompt was provided.",
+        )
+
+    aspect_ratio = data.aspect_ratio if data.aspect_ratio in IMAGE_ASPECT_RATIOS else "square"
+
+    try:
+        image_bytes, mime_type, cost_usd = generate_image_bytes(prompt, aspect_ratio)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Image generation failed: {error}",
+        ) from error
+
+    file_id = save_generated_file(
+        user_id, data.conversation_id, prompt[:150], "image", mime_type, image_bytes
+    )
+
+    try:
+        log_direct_cost(user_id, data.conversation_id, IMAGE_MODEL, cost_usd)
+    except Exception as error:  # noqa: BLE001 - best-effort
+        print(f"EASTA: image-regeneration cost logging failed: {error!r}")
+
+    return {
+        "id": file_id,
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "download_url": f"/api/generated/{file_id}/download",
+        "size_bytes": len(image_bytes),
+    }
 
 
 @app.get("/api/conversations/{conversation_id}/canvas")
