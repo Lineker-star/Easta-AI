@@ -5,5 +5,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="EASTA">
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+<!-- The .ico covers browsers/crawlers that ignore the PNG links below
+     and older tools that only ever check rel="shortcut icon" -- also
+     served at the site root (GET /favicon.ico in frontend/app.py) for
+     the browser's own automatic /favicon.ico request, which happens
+     regardless of these <link> tags. -->
+<link rel="icon" href="{{ url_for('static', filename='icons/favicon.ico') }}" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
 <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='icons/favicon-16.png') }}">

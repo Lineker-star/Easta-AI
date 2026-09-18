@@ -101,3 +101,16 @@ def service_worker():
     response = send_from_directory(app.static_folder, "sw.js")
     response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+@app.get("/favicon.ico")
+def favicon():
+    # Browsers request /favicon.ico automatically, regardless of any
+    # <link rel="icon"> tag in <head> (see _pwa_head.html, which also
+    # links this same file from /static/icons/favicon.ico for the
+    # browsers that do respect the tag) -- without this route that
+    # implicit request 404s in the console even though the favicon
+    # shown to the user is working fine via the <link> tag.
+    return send_from_directory(
+        os.path.join(app.static_folder, "icons"), "favicon.ico"
+    )

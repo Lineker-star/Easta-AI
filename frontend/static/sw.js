@@ -6,7 +6,12 @@
  * GET /sw.js in frontend/app.py) so it can control the whole site,
  * not just /static/. */
 
-const CACHE_NAME = "easta-shell-v4";
+// Bumped whenever a cached asset's *content* changes too, not just the
+// SHELL_ASSETS list -- e.g. v5 is icon-192.png/icon-512.png swapping
+// from the old placeholder "E" to the real logo at the same URLs, so
+// an already-installed PWA actually picks up the new bytes instead of
+// keeping the stale cached version forever under the old cache name.
+const CACHE_NAME = "easta-shell-v5";
 const OFFLINE_URL = "/offline";
 
 const SHELL_ASSETS = [

@@ -734,14 +734,51 @@ production traffic. Pick these up in Cursor:
   else in the UI) is unchanged — the logo's own brown/copper tones are
   self-contained to the image itself, not reflowed into the design
   system. Also added to the service worker's cached shell assets so
-  `offline.html` still shows the logo while genuinely offline.
-  ⚠️ Doesn't touch the separate PWA manifest icon set
-  (`icon-192.png`/`icon-512.png`/`icon-512-maskable.png`/
-  `apple-touch-icon.png`/favicons) — those are a different, unrelated
-  icon system (home-screen/install icons, not `.brand-mark`) and were
-  out of scope for this pass; swapping them for the real logo too
-  (they currently still show the old generated "E") is a reasonable
-  follow-up if wanted.
+  `offline.html` still shows the logo while genuinely offline. The
+  separate PWA manifest icon set (favicons, `apple-touch-icon.png`,
+  `icon-192.png`/`icon-512.png`/`icon-512-maskable.png`) was out of
+  scope for this pass and still showed the old generated "E" —
+  addressed in the next entry below.
+- **Favicon and PWA icons regenerated from the real logo** — every
+  icon a browser/OS expects now comes from the same high-resolution
+  crop as `.brand-mark` above, not the old programmatically-generated
+  "E":
+  - `favicon.ico` (new, multi-resolution 16×16/32×32/48×48) — linked
+    from every page's `<head>` via `_pwa_head.html`, alongside the
+    existing PNG favicon links (`favicon-16.png`/`favicon-32.png`,
+    also regenerated) for browsers that prefer PNG over ICO.
+  - `apple-touch-icon.png` (180×180) regenerated with an opaque cream
+    background (`--color-bg` `#F6F1E8`) rather than transparent, per
+    Apple's guidance that touch icons shouldn't have alpha.
+  - `manifest.json`'s icon entries needed no changes — `icon-192.png`,
+    `icon-512.png`, and `icon-512-maskable.png` are regenerated in
+    place at the same paths the manifest already pointed to, so an
+    installed app's home-screen icon becomes the real logo
+    automatically. `icon-512-maskable.png` specifically got a fresh
+    treatment (not just a resize of the "any"-purpose icon): the logo
+    composited onto the app's terracotta gradient at roughly 62% of
+    the canvas, keeping it inside Android's 80% maskable safe zone —
+    verified by measuring the actual rendered content's max radius
+    from center (170px) against the safe-zone radius (205px) rather
+    than assuming the padding was enough.
+  - Bumped the service worker's cache to `easta-shell-v5` — a version
+    bump for *content* changing at the same cached URLs
+    (`icon-192.png`/`icon-512.png`), not just `SHELL_ASSETS`'s list
+    changing, so an already-installed PWA actually picks up the new
+    icon bytes instead of keeping the old ones cached indefinitely
+    under the previous cache name.
+  - **Fixed the standing `/favicon.ico` 404**: browsers request
+    `/favicon.ico` automatically on every page load regardless of any
+    `<link rel="icon">` tag — nothing served that path before, so it
+    404'd in the console even though the favicon shown to the user
+    (via the PNG `<link>` tags) worked fine. Added
+    `GET /favicon.ico` in `frontend/app.py` (same root-scope pattern
+    as the existing `GET /sw.js`) serving the new `.ico` file directly
+    at the root path. Verified this is the real fix, not just a
+    silenced symptom: curled `/favicon.ico` directly (the exact
+    request a browser fires automatically) and confirmed
+    `200 image/x-icon`, byte-identical to the explicit
+    `/static/icons/favicon.ico` the `<link>` tag points to.
 
 ## Run locally
 
