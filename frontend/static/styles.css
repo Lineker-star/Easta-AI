@@ -790,10 +790,29 @@ button {
     padding: 0 4px;
 }
 
-.conversation-link {
-    display: block;
-    padding: 10px 12px;
+/* The row (not the link) owns the pill background/hover/active state,
+   so highlighting spans the full row width -- including the
+   hover-revealed rename/delete buttons -- not just where the text is. */
+.conversation-row {
+    display: flex;
+    align-items: center;
     border-radius: var(--radius-sm);
+    transition: background 0.15s ease;
+}
+
+.conversation-row:hover {
+    background: var(--color-bg);
+}
+
+.conversation-row.active {
+    background: var(--color-accent-soft);
+}
+
+.conversation-link {
+    flex: 1;
+    min-width: 0;
+    display: block;
+    padding: 10px 4px 10px 12px;
     font-size: 13.5px;
     color: var(--color-text-muted);
     white-space: nowrap;
@@ -802,16 +821,102 @@ button {
     text-decoration: none;
 }
 
-.conversation-link:hover {
-    background: var(--color-bg);
+.conversation-row:hover .conversation-link {
     color: var(--color-text);
     text-decoration: none;
 }
 
-.conversation-link.active {
-    background: var(--color-accent-soft);
+.conversation-row.active .conversation-link {
     color: var(--color-accent-hover);
     font-weight: 600;
+}
+
+.conversation-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding-right: 6px;
+    opacity: 0;
+    flex-shrink: 0;
+    transition: opacity 0.12s ease;
+}
+
+.conversation-row:hover .conversation-row-actions {
+    opacity: 1;
+}
+
+/* Same reasoning as .message-actions above: a touchscreen has no
+   hover state, so a hover-only reveal would leave these permanently
+   invisible and undiscoverable there instead of just harder to reach. */
+@media (hover: none) {
+    .conversation-row-actions {
+        opacity: 1;
+    }
+}
+
+.conversation-action-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-faint);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.conversation-action-button:hover {
+    background: var(--color-surface);
+    color: var(--color-text);
+}
+
+.conversation-action-button.danger:hover {
+    color: var(--color-danger);
+}
+
+.conversation-rename-input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    margin: 2px 4px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-accent);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    box-shadow: 0 0 0 2px var(--color-accent-soft);
+}
+
+.conversation-confirm {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 8px 8px 12px;
+    font-size: 12.5px;
+    color: var(--color-text-muted);
+}
+
+.conversation-confirm-message {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.conversation-confirm-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.conversation-confirm-delete {
+    color: var(--color-danger);
 }
 
 .sidebar-language {
@@ -2413,7 +2518,8 @@ button {
         min-height: 44px;
     }
 
-    .attachment-chip button {
+    .attachment-chip button,
+    .conversation-action-button {
         min-width: 32px;
         min-height: 32px;
     }

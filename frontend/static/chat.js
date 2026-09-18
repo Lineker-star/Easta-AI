@@ -906,26 +906,197 @@ function renderConversations(conversations) {
     conversationList.innerHTML = "";
 
     for (const conversation of conversations) {
-        const link = document.createElement("a");
+        conversationList.appendChild(buildConversationRow(conversation));
+    }
+}
 
-        link.href = `/chat/${conversation.id}`;
-        link.className = "conversation-link";
-        link.textContent = conversation.label;
 
-        if (conversation.id === activeConversationId) {
-            link.classList.add("active");
+function buildConversationRow(conversation) {
+    const row = document.createElement("div");
+    row.className = "conversation-row";
+
+    if (conversation.id === activeConversationId) {
+        row.classList.add("active");
+    }
+
+    const link = document.createElement("a");
+    link.href = `/chat/${conversation.id}`;
+    link.className = "conversation-link";
+    link.textContent = conversation.label;
+
+    link.addEventListener("click", async (event) => {
+        event.preventDefault();
+        await openConversation(conversation.id, true);
+
+        if (window.innerWidth <= 700) {
+            sidebar.classList.add("sidebar-hidden");
+        }
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "conversation-row-actions";
+
+    const renameButton = document.createElement("button");
+    renameButton.type = "button";
+    renameButton.className = "conversation-action-button";
+    renameButton.textContent = "✏️";
+    renameButton.title = t("conversation_rename_title");
+    renameButton.setAttribute("aria-label", t("conversation_rename_title"));
+    renameButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showConversationRenameInput(row, conversation);
+    });
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "conversation-action-button danger";
+    deleteButton.textContent = "🗑️";
+    deleteButton.title = t("conversation_delete_title");
+    deleteButton.setAttribute("aria-label", t("conversation_delete_title"));
+    deleteButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showConversationDeleteConfirm(row, conversation);
+    });
+
+    actions.appendChild(renameButton);
+    actions.appendChild(deleteButton);
+
+    row.appendChild(link);
+    row.appendChild(actions);
+
+    return row;
+}
+
+
+function showConversationRenameInput(row, conversation) {
+    row.innerHTML = "";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "conversation-rename-input";
+    input.value = conversation.title;
+    input.maxLength = 100;
+
+    let settled = false;
+
+    const finish = async (shouldSave) => {
+        if (settled) {
+            return;
+        }
+        settled = true;
+
+        const newTitle = input.value.trim();
+
+        if (shouldSave && newTitle && newTitle !== conversation.title) {
+            try {
+                const response = await apiRequest(
+                    `/api/conversations/${conversation.id}`,
+                    {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ title: newTitle })
+                    }
+                );
+                await readJsonResponse(response);
+            } catch (error) {
+                // Left silent-but-logged rather than a disruptive
+                // showPageError() -- the row below re-renders with
+                // whatever title the server actually has, which is
+                // self-explanatory feedback that the rename didn't
+                // stick.
+                console.error(error);
+            }
         }
 
-        link.addEventListener("click", async (event) => {
+        const conversations = await loadConversations();
+        renderConversations(conversations);
+    };
+
+    input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
             event.preventDefault();
-            await openConversation(conversation.id, true);
+            finish(true);
+        } else if (event.key === "Escape") {
+            event.preventDefault();
+            finish(false);
+        }
+    });
 
-            if (window.innerWidth <= 700) {
-                sidebar.classList.add("sidebar-hidden");
-            }
-        });
+    input.addEventListener("blur", () => finish(true));
 
-        conversationList.appendChild(link);
+    row.appendChild(input);
+    input.focus();
+    input.select();
+}
+
+
+function showConversationDeleteConfirm(row, conversation) {
+    row.innerHTML = "";
+
+    const confirmRow = document.createElement("div");
+    confirmRow.className = "conversation-confirm";
+
+    const message = document.createElement("span");
+    message.className = "conversation-confirm-message";
+    message.textContent = t("conversation_delete_confirm_message");
+
+    const actions = document.createElement("div");
+    actions.className = "conversation-confirm-actions";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "message-action-button";
+    cancelButton.textContent = t("conversation_delete_confirm_cancel");
+    cancelButton.addEventListener("click", async () => {
+        const conversations = await loadConversations();
+        renderConversations(conversations);
+    });
+
+    const confirmButton = document.createElement("button");
+    confirmButton.type = "button";
+    confirmButton.className = "message-action-button conversation-confirm-delete";
+    confirmButton.textContent = t("conversation_delete_confirm_yes");
+    confirmButton.addEventListener("click", () => {
+        deleteConversationAndRefresh(conversation.id);
+    });
+
+    actions.appendChild(cancelButton);
+    actions.appendChild(confirmButton);
+
+    confirmRow.appendChild(message);
+    confirmRow.appendChild(actions);
+    row.appendChild(confirmRow);
+}
+
+
+async function deleteConversationAndRefresh(conversationId) {
+    try {
+        const response = await apiRequest(
+            `/api/conversations/${conversationId}`,
+            { method: "DELETE" }
+        );
+        await readJsonResponse(response);
+    } catch (error) {
+        console.error(error);
+        showPageError(error.message);
+        return;
+    }
+
+    const wasActive = conversationId === activeConversationId;
+    const conversations = await loadConversations();
+
+    if (!wasActive) {
+        renderConversations(conversations);
+        return;
+    }
+
+    if (conversations.length > 0) {
+        await openConversation(conversations[0].id, true);
+    } else {
+        const conversation = await createConversation();
+        await openConversation(conversation.id, true);
     }
 }
 

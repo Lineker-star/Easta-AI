@@ -25,5 +25,10 @@
     "image_style_portrait": "📱 Retrato",
     "image_style_landscape": "🖥️ Panorámico",
     "theme_toggle_dark": "Modo oscuro",
-    "theme_toggle_light": "Modo claro"
+    "theme_toggle_light": "Modo claro",
+    "conversation_rename_title": "Renombrar conversación",
+    "conversation_delete_title": "Eliminar conversación",
+    "conversation_delete_confirm_message": "¿Eliminar esta conversación?",
+    "conversation_delete_confirm_yes": "Eliminar",
+    "conversation_delete_confirm_cancel": "Cancelar"
 }

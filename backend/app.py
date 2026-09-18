@@ -299,6 +299,10 @@ class ApiKeyCreateRequest(BaseModel):
     name: str
 
 
+class RenameConversationRequest(BaseModel):
+    title: str
+
+
 class PublicChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
@@ -860,6 +864,44 @@ def rename_conversation_if_default(
                 WHERE id = %s AND title = 'New Chat';
                 """,
                 (trimmed, conversation_id),
+            )
+
+
+def update_conversation_title(conversation_id: int, title: str):
+    """Explicit user-driven rename (unlike
+    rename_conversation_if_default() above, this always overwrites the
+    title, not just the still-default one). Caller is responsible for
+    the ownership check (get_conversation(conversation_id, user_id))
+    before calling this, same pattern as every other write helper in
+    this section."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE conversations
+                SET title = %s
+                WHERE id = %s;
+                """,
+                (title, conversation_id),
+            )
+
+
+def delete_conversation(conversation_id: int):
+    """Caller is responsible for the ownership check
+    (get_conversation(conversation_id, user_id)) before calling this.
+    messages/generated_files/canvas_artifacts all have ON DELETE
+    CASCADE on their conversation_id foreign key (see
+    database/schema.sql), and usage_logs has ON DELETE SET NULL (kept
+    for historical cost accounting rather than deleted) -- nothing
+    else to clean up manually here."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM conversations
+                WHERE id = %s;
+                """,
+                (conversation_id,),
             )
 
 
@@ -4651,6 +4693,55 @@ def new_conversation(request: Request):
             "created_at": serialize_datetime(conversation[2]),
         }
     }
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def rename_conversation(
+    conversation_id: int,
+    data: RenameConversationRequest,
+    request: Request,
+):
+    user_id = require_user(request)
+
+    conversation = get_conversation(conversation_id, user_id)
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    title = data.title.strip()[:100]
+
+    if not title:
+        raise HTTPException(
+            status_code=400,
+            detail="Title is required.",
+        )
+
+    update_conversation_title(conversation_id, title)
+
+    return {"conversation": {"id": conversation_id, "title": title}}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def remove_conversation(
+    conversation_id: int,
+    request: Request,
+):
+    user_id = require_user(request)
+
+    conversation = get_conversation(conversation_id, user_id)
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    delete_conversation(conversation_id)
+
+    return {"message": "Conversation deleted."}
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

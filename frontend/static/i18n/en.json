@@ -25,5 +25,10 @@
     "image_style_portrait": "📱 Portrait",
     "image_style_landscape": "🖥️ Landscape",
     "theme_toggle_dark": "Dark mode",
-    "theme_toggle_light": "Light mode"
+    "theme_toggle_light": "Light mode",
+    "conversation_rename_title": "Rename conversation",
+    "conversation_delete_title": "Delete conversation",
+    "conversation_delete_confirm_message": "Delete this conversation?",
+    "conversation_delete_confirm_yes": "Delete",
+    "conversation_delete_confirm_cancel": "Cancel"
 }

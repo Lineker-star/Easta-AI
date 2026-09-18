@@ -691,6 +691,33 @@ production traffic. Pick these up in Cursor:
     a Word doc, then slides, each in a fresh conversation with a
     moderately long formatted prior reply) against the deployed app
     before closing this out.
+- **Rename and delete conversations** — hover a conversation in the
+  sidebar to reveal small ✏️/🗑️ buttons next to it (always visible,
+  not hover-gated, on touch devices — same pattern as the message
+  action buttons).
+  - **Rename**: turns the label into an inline text input in place,
+    pre-filled with the current title (capped at 100 characters, same
+    as the existing auto-title-from-first-message logic) — saves on
+    Enter or on blur, discards on Escape.
+  - **Delete**: a lightweight inline confirm row (message + Delete/
+    Cancel buttons) replaces the conversation row in place, not a
+    browser `confirm()` popup. Deleting the currently-open conversation
+    redirects to the next most recent one, or creates a fresh "New
+    Chat" if none remain — never leaves the chat view pointed at a
+    conversation that no longer exists.
+  - **Backend**: `PATCH /api/conversations/{id}` and
+    `DELETE /api/conversations/{id}`, both scoped to the authenticated
+    user's own conversations (404 otherwise, same pattern as the
+    existing conversation endpoints) — see `update_conversation_title()`
+    / `delete_conversation()` in `backend/app.py`.
+  - Confirmed `messages`/`generated_files`/`canvas_artifacts` all
+    already have `ON DELETE CASCADE` on their `conversation_id` foreign
+    key, and `usage_logs` has `ON DELETE SET NULL` (kept for historical
+    cost accounting rather than deleted) — no manual cleanup code
+    needed on delete.
+  - New UI strings added to all three shipped interface languages
+    (`frontend/static/i18n/{en,fr,es}.json`), matching the existing
+    interface-localization coverage.
 
 ## Run locally
 
