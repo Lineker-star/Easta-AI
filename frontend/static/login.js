@@ -3,6 +3,32 @@ const loginError = document.getElementById("login-error");
 const loginButton = loginForm.querySelector(
     'button[type="submit"]'
 );
+const authDivider = document.getElementById("auth-divider");
+const googleSigninButton = document.getElementById("google-signin-button");
+
+
+// A failed Google sign-in redirects back here with ?error=... (see
+// GET /api/auth/google/callback in backend/app.py) -- there's no JSON
+// response to read on a full-page redirect, so the message travels as
+// a query param instead.
+const oauthError = new URLSearchParams(window.location.search).get("error");
+if (oauthError) {
+    loginError.textContent = oauthError;
+}
+
+
+// Same hide-rather-than-show-broken pattern as the mic button /
+// Research toggle: only reveal "Continue with Google" once the
+// backend confirms it's actually configured.
+fetch(`${window.BACKEND_URL}/api/features`)
+    .then((response) => response.json())
+    .then((features) => {
+        if (features.google_signin) {
+            authDivider.hidden = false;
+            googleSigninButton.hidden = false;
+        }
+    })
+    .catch(() => {});
 
 
 loginForm.addEventListener("submit", async (event) => {

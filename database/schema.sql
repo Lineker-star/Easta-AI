@@ -17,18 +17,40 @@ CREATE TABLE IF NOT EXISTS public.users (
     id serial PRIMARY KEY,
     username character varying(50) NOT NULL UNIQUE,
     email character varying(255) NOT NULL UNIQUE,
-    password_hash text NOT NULL,
+    -- Nullable: a Google-only account (auth_provider = 'google') has no
+    -- password at all -- see backend/app.py's create_google_user() /
+    -- GET /api/auth/google/callback.
+    password_hash text,
     -- Scaffolding for a future Stripe (or similar) integration -- see
     -- the Account page / GET /api/account/plan in backend/app.py.
     -- Nothing reads this to gate or limit behavior yet; every account
     -- is effectively unrestricted regardless of this value.
     plan character varying(20) NOT NULL DEFAULT 'free',
+    -- Google's stable per-account id ("sub" in its userinfo response),
+    -- set once a user has signed in with Google -- see
+    -- get_user_by_google_id() / link_google_id() in backend/app.py.
+    -- Nullable + unique: most rows have no Google account linked.
+    google_id character varying(255) UNIQUE,
+    -- How this account was created / how it can log in. A password
+    -- account can still get a google_id linked later (matched by
+    -- verified email) without changing this -- it only reflects how
+    -- the row itself was first created.
+    auth_provider character varying(20) NOT NULL DEFAULT 'password',
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT users_plan_check CHECK (((plan)::text = ANY ((ARRAY['free'::character varying, 'premium'::character varying])::text[])))
+    CONSTRAINT users_plan_check CHECK (((plan)::text = ANY ((ARRAY['free'::character varying, 'premium'::character varying])::text[]))),
+    CONSTRAINT users_auth_provider_check CHECK (((auth_provider)::text = ANY ((ARRAY['password'::character varying, 'google'::character varying])::text[])))
 );
 
--- Safe to re-run against a database created before this column existed.
+-- Safe to re-run against a database created before these columns/
+-- constraints existed.
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS plan character varying(20) NOT NULL DEFAULT 'free';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS google_id character varying(255) UNIQUE;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS auth_provider character varying(20) NOT NULL DEFAULT 'password';
+ALTER TABLE public.users ALTER COLUMN password_hash DROP NOT NULL;
+
+ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_auth_provider_check;
+ALTER TABLE public.users ADD CONSTRAINT users_auth_provider_check
+    CHECK (((auth_provider)::text = ANY ((ARRAY['password'::character varying, 'google'::character varying])::text[])));
 
 --
 -- conversations

@@ -37,7 +37,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from openai import OpenAI
 from pptx import Presentation
 from pptx.dml.color import RGBColor as PptxRGBColor
@@ -95,6 +95,21 @@ COOKIE_SAMESITE = os.getenv(
     "COOKIE_SAMESITE",
     "lax",
 )
+
+# --- Google Sign-In (OAuth 2.0 "Authorization Code" flow) ------------------
+# Optional: unlike DATABASE_URL/OPENROUTER_API_KEY above, an unset
+# GOOGLE_CLIENT_ID doesn't stop the app from starting -- GET
+# /api/auth/google/login just 503s, and GET /api/features reports
+# google_signin: false so the frontend hides the "Continue with Google"
+# button instead of showing one that would just error (same pattern as
+# the mic/TTS/research-mode feature flags below).
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "http://localhost:8000/api/auth/google/callback",
+)
+ENABLE_GOOGLE_SIGNIN = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
 # --- Model routing config -------------------------------------------------
 # EASTA picks between a fast/cheap model and a stronger "smart" model
@@ -473,6 +488,97 @@ def create_user(
             detail=(
                 "That username or email is already registered."
             ),
+        ) from error
+
+
+def get_user_by_google_id(google_id: str):
+    """Returns (id, username, email) for session-cookie purposes --
+    used on every Google sign-in after the first to find the existing
+    account without re-matching by email."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, username, email
+                FROM users
+                WHERE google_id = %s;
+                """,
+                (google_id,),
+            )
+
+            return cursor.fetchone()
+
+
+def link_google_id(user_id: int, google_id: str):
+    """Attaches a Google account to an existing password-based user,
+    matched by verified email in the callback below -- the account
+    keeps its password (auth_provider stays 'password') and gains the
+    ability to also log in with Google going forward."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE users
+                SET google_id = %s
+                WHERE id = %s
+                RETURNING id, username, email;
+                """,
+                (google_id, user_id),
+            )
+
+            return cursor.fetchone()
+
+
+_USERNAME_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_]")
+
+
+def generate_unique_username(seed: str) -> str:
+    """Derives a users.username (50 chars max, unique) from a Google
+    display name or email local-part -- appends a numeric suffix on
+    collision rather than failing the sign-in over a taken username the
+    person never chose themselves."""
+    cleaned = _USERNAME_SANITIZE_RE.sub("", seed).strip("_") or "user"
+    candidate = cleaned[:50]
+    suffix = 0
+
+    while get_user_by_username(candidate):
+        suffix += 1
+        suffix_text = f"_{suffix}"
+        candidate = f"{cleaned[: 50 - len(suffix_text)]}{suffix_text}"
+
+    return candidate
+
+
+def create_google_user(google_id: str, email: str, username: str):
+    """Creates a Google-only account: no password_hash,
+    auth_provider = 'google'. Returns (id, username, email)."""
+    try:
+        with psycopg.connect(DATABASE_URL) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO users (
+                        username,
+                        email,
+                        password_hash,
+                        google_id,
+                        auth_provider
+                    )
+                    VALUES (%s, %s, NULL, %s, 'google')
+                    RETURNING
+                        id,
+                        username,
+                        email;
+                    """,
+                    (username, email, google_id),
+                )
+
+                return cursor.fetchone()
+
+    except UniqueViolation as error:
+        raise HTTPException(
+            status_code=409,
+            detail="An account with that email already exists.",
         ) from error
 
 
@@ -3958,6 +4064,7 @@ def features():
         "generation": ENABLE_GENERATION,
         "server_stt": ENABLE_SERVER_STT,
         "server_tts": ENABLE_SERVER_TTS,
+        "google_signin": ENABLE_GOOGLE_SIGNIN,
     }
 
 
@@ -4041,7 +4148,10 @@ def login(
 
     user = get_user_by_username(username)
 
-    if not user or not check_password_hash(
+    # user[3] (password_hash) is NULL for a Google-only account --
+    # check_password_hash() requires a string, so this must be
+    # checked before calling it rather than letting it raise.
+    if not user or not user[3] or not check_password_hash(
         user[3],
         data.password,
     ):
@@ -4061,6 +4171,129 @@ def login(
             "email": user[2],
         },
     }
+
+
+@app.get("/api/auth/google/login")
+def google_login(request: Request):
+    if not ENABLE_GOOGLE_SIGNIN:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Sign-In is not configured.",
+        )
+
+    # A per-attempt random token, checked against the same value in the
+    # callback below (CSRF protection for the OAuth flow -- without it
+    # an attacker could trick a victim's browser into completing a sign
+    # in initiated by the attacker, e.g. to link the attacker's Google
+    # account to the victim's session).
+    state = secrets.token_urlsafe(24)
+    request.session["oauth_state"] = state
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+
+    return RedirectResponse(
+        "https://accounts.google.com/o/oauth2/v2/auth?"
+        + urllib.parse.urlencode(params)
+    )
+
+
+@app.get("/api/auth/google/callback")
+def google_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    def failure_redirect(message: str) -> RedirectResponse:
+        return RedirectResponse(
+            f"{FRONTEND_URL}/login?error={urllib.parse.quote(message)}"
+        )
+
+    if error:
+        return failure_redirect("Google sign-in was cancelled.")
+
+    expected_state = request.session.pop("oauth_state", None)
+
+    if not state or not expected_state or state != expected_state:
+        return failure_redirect(
+            "Google sign-in failed (invalid state). Please try again."
+        )
+
+    if not code:
+        return failure_redirect("Google sign-in failed. Please try again.")
+
+    try:
+        token_response = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=10,
+        )
+        token_response.raise_for_status()
+        access_token = token_response.json().get("access_token")
+
+        if not access_token:
+            return failure_redirect(
+                "Google sign-in failed. Please try again."
+            )
+
+        profile_response = requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        profile_response.raise_for_status()
+        profile = profile_response.json()
+
+    except requests.RequestException:
+        return failure_redirect("Could not reach Google. Please try again.")
+
+    google_id = profile.get("sub")
+    email = (profile.get("email") or "").strip().lower()
+    email_verified = bool(profile.get("email_verified"))
+    display_name = profile.get("name") or (email.split("@")[0] if email else "")
+
+    if not google_id or not email:
+        return failure_redirect(
+            "Google didn't share the information EASTA needs (email)."
+        )
+
+    user = get_user_by_google_id(google_id)
+
+    if user is None and email_verified:
+        # Only auto-link when Google itself has verified the email --
+        # that's what makes trusting the match safe (an unverified
+        # email on the Google side isn't proof of ownership).
+        existing = get_user_by_email(email)
+        if existing:
+            user = link_google_id(existing[0], google_id)
+
+    if user is None:
+        username = generate_unique_username(display_name or email)
+        try:
+            user = create_google_user(google_id, email, username)
+        except HTTPException:
+            return failure_redirect(
+                "An account with that email already exists."
+            )
+
+    request.session["user_id"] = user[0]
+    request.session["username"] = user[1]
+
+    return RedirectResponse(f"{FRONTEND_URL}/chat")
 
 
 @app.get("/api/session")
@@ -4194,10 +4427,18 @@ def change_password(
 
     user = get_user_by_id(user_id)
 
-    if not user or not check_password_hash(
-        user[3],
-        data.current_password,
-    ):
+    if not user or not user[3]:
+        # user[3] (password_hash) is NULL for a Google-only account --
+        # there's no current password to check against.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This account signed up with Google and has no "
+                "password set."
+            ),
+        )
+
+    if not check_password_hash(user[3], data.current_password):
         raise HTTPException(
             status_code=401,
             detail="Current password is incorrect.",

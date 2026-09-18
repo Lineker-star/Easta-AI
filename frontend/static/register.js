@@ -10,6 +10,23 @@ const registerButton = registerForm.querySelector(
     'button[type="submit"]'
 );
 
+const authDivider = document.getElementById("auth-divider");
+const googleSigninButton = document.getElementById("google-signin-button");
+
+
+// Same hide-rather-than-show-broken pattern as the mic button /
+// Research toggle: only reveal "Continue with Google" once the
+// backend confirms it's actually configured.
+fetch(`${window.BACKEND_URL}/api/features`)
+    .then((response) => response.json())
+    .then((features) => {
+        if (features.google_signin) {
+            authDivider.hidden = false;
+            googleSigninButton.hidden = false;
+        }
+    })
+    .catch(() => {});
+
 
 registerForm.addEventListener(
     "submit",
