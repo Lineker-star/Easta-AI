@@ -187,25 +187,99 @@ CREATE INDEX IF NOT EXISTS idx_messages_search_vector
     ON public.messages USING GIN (search_vector);
 
 --
+-- organizations / organization_members
+-- Phase 22: shared team workspaces. An organization is just a name +
+-- an invite link (invite_token) -- joining via POST
+-- /api/organizations/join/{token} adds an organization_members row.
+-- role is 'owner' (created the org, or granted ownership -- can
+-- manage members/invite link) or 'member' (can use/add to the shared
+-- knowledge base, cannot manage membership). See backend/app.py's
+-- "Organizations" section for the full membership/invite flow.
+--
+-- Explicit design decision (documented here since it's a real privacy
+-- boundary, not an oversight): belonging to the same organization
+-- does NOT give members visibility into each other's individual
+-- conversations. Conversations stay 100% scoped to conversations.user_id
+-- exactly as before this phase -- nothing about conversations changed.
+-- Organizations only ever share two things: the documents (RAG
+-- knowledge base) rows below, and the combined cost-dashboard view for
+-- owners (GET /api/organizations/{id}/usage, which reads usage_logs --
+-- see the note above that route for why usage_logs itself doesn't get
+-- an org_id column). This is the safer default the brief itself
+-- recommends, not just the easier one to build.
+--
+
+CREATE TABLE IF NOT EXISTS public.organizations (
+    id serial PRIMARY KEY,
+    name character varying(100) NOT NULL,
+    -- Unique, unguessable (secrets.token_urlsafe) -- the whole join
+    -- flow is "anyone with this link can join", so treat it like the
+    -- share_token on conversations above: rotate it
+    -- (POST .../invite/regenerate) any time it needs to stop working.
+    invite_token character varying(64) UNIQUE,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.organization_members (
+    id serial PRIMARY KEY,
+    org_id integer NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+    user_id integer NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    role character varying(20) NOT NULL DEFAULT 'member',
+    joined_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT organization_members_role_check CHECK (((role)::text = ANY ((ARRAY['owner'::character varying, 'member'::character varying])::text[]))),
+    CONSTRAINT organization_members_unique UNIQUE (org_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_organization_members_user_id
+    ON public.organization_members (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_organization_members_org_id
+    ON public.organization_members (org_id);
+
+--
 -- documents
 -- The knowledge base used for RAG grounding. Each row is one chunk /
--- document the user has taught EASTA about; `search_vector` powers
--- Postgres full-text search retrieval at query time (see
+-- document EASTA has been taught; `search_vector` powers Postgres
+-- full-text search retrieval at query time (see
 -- retrieve_relevant_chunks() in backend/app.py). This keyword-search
 -- approach needs no extra extensions or embedding calls, so it works
 -- out of the box on a plain managed Postgres instance (e.g. Sevalla).
 -- Upgrade path: swap to pgvector + real embeddings for semantic (not
 -- just keyword) retrieval once you need it.
 --
+-- Phase 22: a document now belongs to EITHER a user (personal, exactly
+-- the pre-Phase-22 behavior -- every existing row already satisfies
+-- this) OR an organization (shared with every member) -- never both,
+-- never neither, enforced by documents_owner_check below rather than
+-- just application-level discipline.
+--
 
 CREATE TABLE IF NOT EXISTS public.documents (
     id serial PRIMARY KEY,
-    user_id integer NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    user_id integer REFERENCES public.users(id) ON DELETE CASCADE,
+    org_id integer REFERENCES public.organizations(id) ON DELETE CASCADE,
     title character varying(200) NOT NULL,
     content text NOT NULL,
     search_vector tsvector NOT NULL,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT documents_owner_check CHECK (
+        (user_id IS NOT NULL AND org_id IS NULL)
+        OR (user_id IS NULL AND org_id IS NOT NULL)
+    )
 );
+
+-- Safe to re-run against a database created before these columns/
+-- constraints existed -- every pre-existing row already has user_id
+-- set and org_id NULL, so it already satisfies documents_owner_check
+-- once user_id is allowed to be nullable.
+ALTER TABLE public.documents ALTER COLUMN user_id DROP NOT NULL;
+ALTER TABLE public.documents ADD COLUMN IF NOT EXISTS org_id integer REFERENCES public.organizations(id) ON DELETE CASCADE;
+ALTER TABLE public.documents DROP CONSTRAINT IF EXISTS documents_owner_check;
+ALTER TABLE public.documents ADD CONSTRAINT documents_owner_check
+    CHECK (
+        (user_id IS NOT NULL AND org_id IS NULL)
+        OR (user_id IS NULL AND org_id IS NOT NULL)
+    );
 
 CREATE INDEX IF NOT EXISTS idx_documents_search_vector
     ON public.documents USING GIN (search_vector);
@@ -213,12 +287,25 @@ CREATE INDEX IF NOT EXISTS idx_documents_search_vector
 CREATE INDEX IF NOT EXISTS idx_documents_user_id
     ON public.documents (user_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_documents_org_id
+    ON public.documents (org_id, created_at DESC);
+
 --
 -- usage_logs
 -- Backs the cost dashboard: one row per model call, with token counts
 -- and an estimated USD cost computed from the pricing table in
 -- backend/app.py. Estimates only -- reconcile against your OpenRouter
 -- invoice periodically.
+--
+-- Phase 22 note: the organization owner's combined cost dashboard
+-- (GET /api/organizations/{id}/usage) deliberately does NOT need an
+-- org_id column here -- every row already has a real user_id, and
+-- "this org's spend" is just usage_logs joined through
+-- organization_members.user_id for that org's members, computed at
+-- query time. A row never changes meaning depending on which org (if
+-- any) its user happens to belong to when you look, which an
+-- org_id-on-usage_logs column would have to get right at insert time
+-- instead (e.g. multi-org members, or a call made before joining).
 --
 
 CREATE TABLE IF NOT EXISTS public.usage_logs (

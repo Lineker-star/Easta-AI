@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Knowledge base — EASTA</title>
+
+    {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+</head>
+
+<body class="usage-page">
+
+    <div class="usage-shell">
+
+        <div class="usage-header">
+            <div class="brand-row">
+                <img
+                    class="brand-mark"
+                    src="{{ url_for('static', filename='icons/icon-square.png') }}"
+                    alt="EASTA"
+                >
+                <div>
+                    <h1>Knowledge base</h1>
+                </div>
+            </div>
+
+            <a href="{{ url_for('chat') }}" class="btn btn-secondary">
+                &larr; Back to chat
+            </a>
+        </div>
+
+        <div class="usage-panel">
+            <p class="account-meta">
+                Documents added here ground EASTA's answers (retrieval-
+                augmented generation): the assistant searches them for
+                relevant passages before replying. Personal documents
+                are visible only to you; an organization's documents
+                are shared with every member of that organization.
+            </p>
+
+            <div class="doc-scope-row">
+                <label for="document-scope-select">Knowledge base</label>
+                <select id="document-scope-select">
+                    <option value="personal">Personal</option>
+                </select>
+            </div>
+
+            <p id="documents-error" class="error-message"></p>
+
+            <div id="documents-list"></div>
+
+            <form id="new-document-form" class="login-form">
+                <div class="login-field">
+                    <label for="document-title">Title</label>
+                    <input
+                        type="text"
+                        id="document-title"
+                        placeholder="e.g. Refund policy"
+                        maxlength="200"
+                        required
+                    >
+                </div>
+
+                <div class="login-field">
+                    <label for="document-content">Content</label>
+                    <textarea
+                        id="document-content"
+                        placeholder="Paste or write the document text here…"
+                        required
+                    ></textarea>
+                </div>
+
+                <button type="submit" class="btn btn-primary">
+                    Add document
+                </button>
+            </form>
+        </div>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+        window.INITIAL_ORG_ID = {{ initial_org_id | tojson }};
+    </script>
+
+    <script src="{{ url_for('static', filename='documents.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
+
+</body>
+</html>

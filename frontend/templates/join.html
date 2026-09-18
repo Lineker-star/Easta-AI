@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Join organization — EASTA</title>
+
+    {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+</head>
+
+<body class="login-page">
+
+    <div class="login-card">
+
+        <div class="login-brand">
+            <img
+                class="brand-mark"
+                src="{{ url_for('static', filename='icons/icon-square.png') }}"
+                alt="EASTA"
+            >
+
+            <div>
+                <h1>EASTA</h1>
+                <p>Your AI assistant, built for Africa</p>
+            </div>
+        </div>
+
+        <div class="login-heading">
+            <h2>You've been invited</h2>
+            <p id="join-description">
+                Join this organization to share its knowledge base and
+                billing with the rest of the team.
+            </p>
+        </div>
+
+        <p id="join-error" class="error-message"></p>
+        <p id="join-success" class="success-message"></p>
+
+        <button
+            type="button"
+            class="login-button"
+            id="join-button"
+        >
+            Join organization
+        </button>
+
+        <p class="login-switch">
+            <a href="{{ url_for('chat') }}">&larr; Back to chat</a>
+        </p>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+        window.INVITE_TOKEN = {{ invite_token | tojson }};
+    </script>
+
+    <script src="{{ url_for('static', filename='join.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
+
+</body>
+</html>

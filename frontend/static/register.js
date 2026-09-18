@@ -14,6 +14,11 @@ const authDivider = document.getElementById("auth-divider");
 const googleSigninButton = document.getElementById("google-signin-button");
 
 
+// See login.js's identical nextPath -- same "come back to the page
+// that sent you here" behavior, e.g. an org invite link.
+const nextPath = registerForm.dataset.next || "/chat";
+
+
 // Same hide-rather-than-show-broken pattern as the mic button /
 // Research toggle: only reveal "Continue with Google" once the
 // backend confirms it's actually configured.
@@ -88,7 +93,7 @@ registerForm.addEventListener(
                 );
             }
 
-            window.location.href = "/chat";
+            window.location.href = nextPath;
 
         } catch (error) {
             registerError.textContent = error.message;

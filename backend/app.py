@@ -357,6 +357,10 @@ class DocumentRequest(BaseModel):
     content: str
 
 
+class CreateOrganizationRequest(BaseModel):
+    name: str
+
+
 class SpeakRequest(BaseModel):
     text: str
     # Reply-language code (see LANGUAGE_OPTIONS) -- currently unused by
@@ -854,6 +858,338 @@ def clear_user_memory(user_id: int):
                 "DELETE FROM user_memory WHERE user_id = %s;",
                 (user_id,),
             )
+
+
+# --- Organizations (Phase 22) -----------------------------------------------
+# Shared team workspaces. See database/schema.sql's organizations /
+# organization_members comment for the full design, including the
+# explicit "conversations stay private, only the knowledge base and
+# billing are shared" decision. Route-level guards below
+# (require_org_member() / require_org_owner()) mirror require_user()'s
+# style; membership checks return 404 (not 403) for a non-member so a
+# stranger can't even confirm an org id exists.
+
+def create_organization(name: str, owner_user_id: int):
+    """Creates the org and adds its creator as 'owner' in the same
+    transaction -- an org can never exist with zero members. Returns
+    (id, name, invite_token, created_at)."""
+    invite_token = secrets.token_urlsafe(32)
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO organizations (name, invite_token)
+                VALUES (%s, %s)
+                RETURNING id, name, invite_token, created_at;
+                """,
+                (name, invite_token),
+            )
+            org = cursor.fetchone()
+
+            cursor.execute(
+                """
+                INSERT INTO organization_members (org_id, user_id, role)
+                VALUES (%s, %s, 'owner');
+                """,
+                (org[0], owner_user_id),
+            )
+
+    return org
+
+
+def get_user_organizations(user_id: int):
+    """Returns (org_id, name, role) for every org this user belongs
+    to, oldest membership first."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT o.id, o.name, om.role
+                FROM organization_members om
+                JOIN organizations o ON o.id = om.org_id
+                WHERE om.user_id = %s
+                ORDER BY om.joined_at;
+                """,
+                (user_id,),
+            )
+
+            return cursor.fetchall()
+
+
+def get_organization_membership(org_id: int, user_id: int):
+    """Returns this user's role ('owner'/'member') in this org, or
+    None if they're not a member."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT role
+                FROM organization_members
+                WHERE org_id = %s AND user_id = %s;
+                """,
+                (org_id, user_id),
+            )
+
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+
+def require_org_member(org_id: int, user_id: int) -> str:
+    role = get_organization_membership(org_id, user_id)
+
+    if not role:
+        raise HTTPException(
+            status_code=404,
+            detail="Organization not found.",
+        )
+
+    return role
+
+
+def require_org_owner(org_id: int, user_id: int) -> None:
+    role = require_org_member(org_id, user_id)
+
+    if role != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail="Only an organization owner can do this.",
+        )
+
+
+def get_organization(org_id: int):
+    """Returns (id, name, invite_token, created_at) or None."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, invite_token, created_at
+                FROM organizations
+                WHERE id = %s;
+                """,
+                (org_id,),
+            )
+
+            return cursor.fetchone()
+
+
+def get_organization_by_invite_token(token: str):
+    """Returns (id, name) or None."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name
+                FROM organizations
+                WHERE invite_token = %s;
+                """,
+                (token,),
+            )
+
+            return cursor.fetchone()
+
+
+def regenerate_organization_invite_token(org_id: int) -> str:
+    """Rotates the invite link -- same "revoke by changing the value"
+    idea as conversations.share_token: any link built from the old
+    token immediately stops working."""
+    new_token = secrets.token_urlsafe(32)
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE organizations
+                SET invite_token = %s
+                WHERE id = %s;
+                """,
+                (new_token, org_id),
+            )
+
+    return new_token
+
+
+def join_organization(org_id: int, user_id: int, role: str = "member"):
+    """Idempotent: joining an org you already belong to is a no-op,
+    not an error."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO organization_members (org_id, user_id, role)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (org_id, user_id) DO NOTHING;
+                """,
+                (org_id, user_id, role),
+            )
+
+
+def get_organization_members(org_id: int):
+    """Returns (user_id, username, email, role, joined_at) rows."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.id, u.username, u.email, om.role, om.joined_at
+                FROM organization_members om
+                JOIN users u ON u.id = om.user_id
+                WHERE om.org_id = %s
+                ORDER BY om.joined_at;
+                """,
+                (org_id,),
+            )
+
+            return cursor.fetchall()
+
+
+def count_organization_owners(org_id: int) -> int:
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM organization_members
+                WHERE org_id = %s AND role = 'owner';
+                """,
+                (org_id,),
+            )
+
+            return cursor.fetchone()[0]
+
+
+def remove_organization_member(org_id: int, user_id: int):
+    """Caller (the route) is responsible for the "don't strand the org
+    without an owner" check -- see count_organization_owners()."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM organization_members
+                WHERE org_id = %s AND user_id = %s;
+                """,
+                (org_id, user_id),
+            )
+
+
+def get_organization_usage(org_id: int):
+    """Returns (user_id, username, total_cost, call_count) per member
+    -- backs the owner-only combined cost dashboard. LEFT JOIN so a
+    member with zero calls still shows up with 0/0 rather than being
+    silently absent from their own org's breakdown."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    u.id,
+                    u.username,
+                    COALESCE(SUM(ul.cost_usd), 0) AS total_cost,
+                    COUNT(ul.id) AS call_count
+                FROM organization_members om
+                JOIN users u ON u.id = om.user_id
+                LEFT JOIN usage_logs ul ON ul.user_id = u.id
+                WHERE om.org_id = %s
+                GROUP BY u.id, u.username
+                ORDER BY total_cost DESC;
+                """,
+                (org_id,),
+            )
+
+            return cursor.fetchall()
+
+
+# --- Documents (RAG knowledge base) -----------------------------------------
+# Phase 22: a document belongs to either a user (personal) or an org
+# (shared with every member) -- see database/schema.sql's
+# documents_owner_check. Exactly one of user_id/org_id is passed to
+# each helper below; the caller (the route) decides which, after its
+# own auth/membership check.
+
+def create_document_row(
+    title: str,
+    content: str,
+    user_id: int | None = None,
+    org_id: int | None = None,
+):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO documents (
+                    user_id, org_id, title, content, search_vector
+                )
+                VALUES (
+                    %s, %s, %s, %s, to_tsvector('english', %s)
+                )
+                RETURNING id, title, created_at;
+                """,
+                (user_id, org_id, title, content, content),
+            )
+
+            return cursor.fetchone()
+
+
+def get_document_rows(user_id: int | None = None, org_id: int | None = None):
+    """Returns (id, title, created_at, length) rows for exactly one of
+    user_id/org_id."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            if org_id is not None:
+                cursor.execute(
+                    """
+                    SELECT id, title, created_at, length(content)
+                    FROM documents
+                    WHERE org_id = %s
+                    ORDER BY created_at DESC;
+                    """,
+                    (org_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, title, created_at, length(content)
+                    FROM documents
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC;
+                    """,
+                    (user_id,),
+                )
+
+            return cursor.fetchall()
+
+
+def delete_document_row(
+    document_id: int,
+    user_id: int | None = None,
+    org_id: int | None = None,
+) -> bool:
+    """Exactly one of user_id/org_id scopes the delete. For an org
+    document, any member may delete it (a shared, collaboratively
+    editable knowledge base, not owner-gated) -- the route has already
+    confirmed the caller is a member before calling this. Returns
+    whether a row was actually deleted."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            if org_id is not None:
+                cursor.execute(
+                    """
+                    DELETE FROM documents
+                    WHERE id = %s AND org_id = %s
+                    RETURNING id;
+                    """,
+                    (document_id, org_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    DELETE FROM documents
+                    WHERE id = %s AND user_id = %s
+                    RETURNING id;
+                    """,
+                    (document_id, user_id),
+                )
+
+            return cursor.fetchone() is not None
 
 
 # --- Conversation / message helpers -----------------------------------------
@@ -1556,6 +1892,10 @@ def model_chain_for_images() -> list[str]:
 # need semantic (not just keyword) matching.
 
 def retrieve_relevant_chunks(query: str, user_id: int, limit: int = 3):
+    """Phase 22: searches the user's personal documents AND every
+    organization they belong to's shared documents in one query (the
+    org_id subquery), not just their own -- someone in two orgs gets
+    grounding from both, no special-casing needed for "how many orgs"."""
     query = query.strip()
 
     if not query:
@@ -1575,13 +1915,19 @@ def retrieve_relevant_chunks(query: str, user_id: int, limit: int = 3):
                         ) AS rank
                     FROM documents
                     WHERE
-                        user_id = %s
+                        (
+                            user_id = %s
+                            OR org_id IN (
+                                SELECT org_id FROM organization_members
+                                WHERE user_id = %s
+                            )
+                        )
                         AND search_vector @@
                             websearch_to_tsquery('english', %s)
                     ORDER BY rank DESC
                     LIMIT %s;
                     """,
-                    (query, user_id, query, limit),
+                    (query, user_id, user_id, query, limit),
                 )
 
                 return cursor.fetchall()
@@ -4712,8 +5058,22 @@ def login(
     }
 
 
+def _safe_next_path(raw_value: str | None) -> str | None:
+    """Mirrors frontend/app.py's identical helper -- only ever returns a
+    same-site relative path (or None), so a value like
+    "https://evil.example" or "//evil.example" can never be trusted as
+    a post-sign-in redirect target."""
+    if not raw_value:
+        return None
+
+    if not raw_value.startswith("/") or raw_value.startswith("//"):
+        return None
+
+    return raw_value
+
+
 @app.get("/api/auth/google/login")
-def google_login(request: Request):
+def google_login(request: Request, next: str | None = None):
     if not ENABLE_GOOGLE_SIGNIN:
         raise HTTPException(
             status_code=503,
@@ -4727,6 +5087,12 @@ def google_login(request: Request):
     # account to the victim's session).
     state = secrets.token_urlsafe(24)
     request.session["oauth_state"] = state
+
+    # Carried through the whole round trip to Google and back in the
+    # session (not as a "state"-appended query param) so it survives
+    # untouched regardless of what Google echoes back -- see
+    # google_callback below, which is where it's actually used.
+    request.session["oauth_next"] = _safe_next_path(next)
 
     params = {
         "client_id": GOOGLE_CLIENT_ID,
@@ -4832,7 +5198,9 @@ def google_callback(
     request.session["user_id"] = user[0]
     request.session["username"] = user[1]
 
-    return RedirectResponse(f"{FRONTEND_URL}/chat")
+    next_path = request.session.pop("oauth_next", None)
+
+    return RedirectResponse(f"{FRONTEND_URL}{next_path or '/chat'}")
 
 
 @app.get("/api/session")
@@ -6350,40 +6718,7 @@ def download_transcription_job(
 
 # --- Routes: documents (RAG knowledge base) ---------------------------------
 
-@app.get("/api/documents")
-def list_documents(request: Request):
-    user_id = require_user(request)
-
-    with psycopg.connect(DATABASE_URL) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT id, title, created_at, length(content)
-                FROM documents
-                WHERE user_id = %s
-                ORDER BY created_at DESC;
-                """,
-                (user_id,),
-            )
-            rows = cursor.fetchall()
-
-    return {
-        "documents": [
-            {
-                "id": row[0],
-                "title": row[1],
-                "created_at": serialize_datetime(row[2]),
-                "length": row[3],
-            }
-            for row in rows
-        ]
-    }
-
-
-@app.post("/api/documents")
-def add_document(data: DocumentRequest, request: Request):
-    user_id = require_user(request)
-
+def _validate_document_fields(data: DocumentRequest) -> tuple[str, str]:
     title = data.title.strip()[:200] or "Untitled"
     content = data.content.strip()
 
@@ -6399,21 +6734,37 @@ def add_document(data: DocumentRequest, request: Request):
             detail="Document is too large (200,000 character limit).",
         )
 
-    with psycopg.connect(DATABASE_URL) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO documents (
-                    user_id, title, content, search_vector
-                )
-                VALUES (
-                    %s, %s, %s, to_tsvector('english', %s)
-                )
-                RETURNING id, title, created_at;
-                """,
-                (user_id, title, content, content),
-            )
-            row = cursor.fetchone()
+    return title, content
+
+
+def _serialize_document_rows(rows) -> list[dict]:
+    return [
+        {
+            "id": row[0],
+            "title": row[1],
+            "created_at": serialize_datetime(row[2]),
+            "length": row[3],
+        }
+        for row in rows
+    ]
+
+
+@app.get("/api/documents")
+def list_documents(request: Request):
+    """Personal knowledge base only -- see the
+    /api/organizations/{org_id}/documents routes below for an org's
+    shared one."""
+    user_id = require_user(request)
+
+    return {"documents": _serialize_document_rows(get_document_rows(user_id=user_id))}
+
+
+@app.post("/api/documents")
+def add_document(data: DocumentRequest, request: Request):
+    user_id = require_user(request)
+
+    title, content = _validate_document_fields(data)
+    row = create_document_row(title, content, user_id=user_id)
 
     return {
         "document": {
@@ -6428,19 +6779,235 @@ def add_document(data: DocumentRequest, request: Request):
 def delete_document(document_id: int, request: Request):
     user_id = require_user(request)
 
-    with psycopg.connect(DATABASE_URL) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                DELETE FROM documents
-                WHERE id = %s AND user_id = %s
-                RETURNING id;
-                """,
-                (document_id, user_id),
-            )
-            row = cursor.fetchone()
+    if not delete_document_row(document_id, user_id=user_id):
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found.",
+        )
 
-    if not row:
+    return {"message": "Document deleted."}
+
+
+# --- Routes: organizations (Phase 22) ---------------------------------------
+
+@app.post("/api/organizations")
+def create_organization_route(data: CreateOrganizationRequest, request: Request):
+    user_id = require_user(request)
+
+    name = data.name.strip()[:100]
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Organization name is required.",
+        )
+
+    org = create_organization(name, user_id)
+
+    return {
+        "organization": {
+            "id": org[0],
+            "name": org[1],
+            "invite_url": f"{FRONTEND_URL}/join/{org[2]}",
+            "created_at": serialize_datetime(org[3]),
+            "role": "owner",
+        }
+    }
+
+
+@app.get("/api/organizations")
+def list_organizations_route(request: Request):
+    user_id = require_user(request)
+
+    rows = get_user_organizations(user_id)
+
+    return {
+        "organizations": [
+            {"id": org_id, "name": name, "role": role}
+            for org_id, name, role in rows
+        ]
+    }
+
+
+@app.get("/api/organizations/{org_id}")
+def get_organization_route(org_id: int, request: Request):
+    user_id = require_user(request)
+    role = require_org_member(org_id, user_id)
+
+    org = get_organization(org_id)
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found.")
+
+    return {
+        "organization": {
+            "id": org[0],
+            "name": org[1],
+            "invite_url": f"{FRONTEND_URL}/join/{org[2]}",
+            "created_at": serialize_datetime(org[3]),
+            "role": role,
+        }
+    }
+
+
+@app.post("/api/organizations/{org_id}/invite/regenerate")
+def regenerate_invite_route(org_id: int, request: Request):
+    user_id = require_user(request)
+    require_org_owner(org_id, user_id)
+
+    new_token = regenerate_organization_invite_token(org_id)
+
+    return {"invite_url": f"{FRONTEND_URL}/join/{new_token}"}
+
+
+@app.post("/api/organizations/join/{invite_token}")
+def join_organization_route(invite_token: str, request: Request):
+    user_id = require_user(request)
+
+    org = get_organization_by_invite_token(invite_token)
+
+    if not org:
+        raise HTTPException(
+            status_code=404,
+            detail="This invite link is invalid or no longer active.",
+        )
+
+    join_organization(org[0], user_id, role="member")
+
+    return {"organization": {"id": org[0], "name": org[1]}}
+
+
+@app.get("/api/organizations/{org_id}/members")
+def list_organization_members_route(org_id: int, request: Request):
+    user_id = require_user(request)
+    require_org_member(org_id, user_id)
+
+    rows = get_organization_members(org_id)
+
+    return {
+        "members": [
+            {
+                "user_id": member_user_id,
+                "username": username,
+                "email": email,
+                "role": role,
+                "joined_at": serialize_datetime(joined_at),
+            }
+            for member_user_id, username, email, role, joined_at in rows
+        ]
+    }
+
+
+@app.delete("/api/organizations/{org_id}/members/{member_user_id}")
+def remove_organization_member_route(
+    org_id: int, member_user_id: int, request: Request
+):
+    user_id = require_user(request)
+    require_org_owner(org_id, user_id)
+
+    target_role = get_organization_membership(org_id, member_user_id)
+
+    if not target_role:
+        raise HTTPException(status_code=404, detail="Member not found.")
+
+    if target_role == "owner" and count_organization_owners(org_id) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Can't remove the only owner -- promote another member "
+                "to owner first."
+            ),
+        )
+
+    remove_organization_member(org_id, member_user_id)
+
+    return {"message": "Member removed."}
+
+
+@app.post("/api/organizations/{org_id}/leave")
+def leave_organization_route(org_id: int, request: Request):
+    user_id = require_user(request)
+    role = require_org_member(org_id, user_id)
+
+    if role == "owner" and count_organization_owners(org_id) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "You're the only owner -- promote another member to "
+                "owner before leaving."
+            ),
+        )
+
+    remove_organization_member(org_id, user_id)
+
+    return {"message": "Left the organization."}
+
+
+@app.get("/api/organizations/{org_id}/usage")
+def organization_usage_route(org_id: int, request: Request):
+    """Combined cost dashboard -- owner-only (not every member), same
+    as the brief specifies. Deliberately separate from GET
+    /api/usage/summary, which stays scoped to the caller's own data
+    regardless of org membership."""
+    user_id = require_user(request)
+    require_org_owner(org_id, user_id)
+
+    rows = get_organization_usage(org_id)
+
+    members = [
+        {
+            "user_id": member_user_id,
+            "username": username,
+            "total_cost": float(total_cost),
+            "call_count": call_count,
+        }
+        for member_user_id, username, total_cost, call_count in rows
+    ]
+
+    return {
+        "total_cost": sum(member["total_cost"] for member in members),
+        "total_calls": sum(member["call_count"] for member in members),
+        "members": members,
+    }
+
+
+@app.get("/api/organizations/{org_id}/documents")
+def list_organization_documents_route(org_id: int, request: Request):
+    user_id = require_user(request)
+    require_org_member(org_id, user_id)
+
+    return {
+        "documents": _serialize_document_rows(get_document_rows(org_id=org_id))
+    }
+
+
+@app.post("/api/organizations/{org_id}/documents")
+def add_organization_document_route(
+    org_id: int, data: DocumentRequest, request: Request
+):
+    user_id = require_user(request)
+    require_org_member(org_id, user_id)
+
+    title, content = _validate_document_fields(data)
+    row = create_document_row(title, content, org_id=org_id)
+
+    return {
+        "document": {
+            "id": row[0],
+            "title": row[1],
+            "created_at": serialize_datetime(row[2]),
+        }
+    }
+
+
+@app.delete("/api/organizations/{org_id}/documents/{document_id}")
+def delete_organization_document_route(
+    org_id: int, document_id: int, request: Request
+):
+    user_id = require_user(request)
+    require_org_member(org_id, user_id)
+
+    if not delete_document_row(document_id, org_id=org_id):
         raise HTTPException(
             status_code=404,
             detail="Document not found.",

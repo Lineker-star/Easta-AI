@@ -64,6 +64,46 @@
             </div>
         </div>
 
+        <div class="usage-panel" id="org-usage-panel" hidden>
+            <h2>Organization spend</h2>
+
+            <p class="account-meta">
+                Combined spend across everyone in the organization —
+                visible to owners only. Your own personal spend above
+                is unaffected by organization membership.
+            </p>
+
+            <div class="org-usage-header">
+                <label for="org-usage-select">Organization</label>
+                <select id="org-usage-select"></select>
+            </div>
+
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Total spend</div>
+                    <div class="stat-value" id="org-stat-total-cost">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Total calls</div>
+                    <div class="stat-value" id="org-stat-total-calls">—</div>
+                </div>
+            </div>
+
+            <div class="table-scroll">
+                <table class="usage-table" id="org-usage-table">
+                    <thead>
+                        <tr>
+                            <th>Member</th>
+                            <th>Spend</th>
+                            <th>Calls</th>
+                        </tr>
+                    </thead>
+                    <tbody id="org-usage-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+
         <div class="usage-panel">
             <h2>Spend, last 30 days</h2>
 

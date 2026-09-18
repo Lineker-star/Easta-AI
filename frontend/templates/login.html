@@ -49,6 +49,7 @@
         <form
             id="login-form"
             class="login-form"
+            data-next="{{ next_path or '' }}"
         >
 
             <div class="login-field">
@@ -85,7 +86,7 @@
         <div class="auth-divider" id="auth-divider" hidden>or</div>
 
         <a
-            href="{{ backend_url }}/api/auth/google/login"
+            href="{{ google_login_url }}"
             class="google-signin-button"
             id="google-signin-button"
             hidden
@@ -101,7 +102,7 @@
 
         <p class="login-switch">
             Don't have an account?
-            <a href="{{ url_for('register') }}">Create one</a>
+            <a href="{{ url_for('register', next=next_path) if next_path else url_for('register') }}">Create one</a>
         </p>
 
         <p class="login-switch">

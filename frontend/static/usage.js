@@ -247,4 +247,106 @@ async function initializeUsageDashboard() {
 }
 
 
+function renderOrganizationUsage(usage) {
+    document.getElementById("org-stat-total-cost").textContent =
+        formatUsd(usage.total_cost);
+
+    document.getElementById("org-stat-total-calls").textContent =
+        formatNumber(usage.total_calls);
+
+    const body = document.getElementById("org-usage-table-body");
+    body.innerHTML = "";
+
+    if (usage.members.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 3;
+        cell.className = "usage-empty";
+        cell.textContent = "No members yet.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+    }
+
+    for (const member of usage.members) {
+        const row = document.createElement("tr");
+
+        const nameCell = document.createElement("td");
+        nameCell.textContent = member.username;
+
+        const costCell = document.createElement("td");
+        costCell.textContent = formatUsd(member.total_cost);
+
+        const callsCell = document.createElement("td");
+        callsCell.textContent = formatNumber(member.call_count);
+
+        row.appendChild(nameCell);
+        row.appendChild(costCell);
+        row.appendChild(callsCell);
+        body.appendChild(row);
+    }
+}
+
+
+async function loadOrganizationUsage(orgId) {
+    try {
+        const response = await apiRequest(`/api/organizations/${orgId}/usage`);
+        const data = await readJsonResponse(response);
+        renderOrganizationUsage(data);
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+
+// Combined cost dashboard for orgs the user OWNS -- hidden entirely if
+// they own none (most users), following the same hide-rather-than-show-
+// empty pattern as the Google sign-in button / mic button elsewhere.
+async function initializeOrganizationUsage() {
+    const panel = document.getElementById("org-usage-panel");
+    const select = document.getElementById("org-usage-select");
+
+    try {
+        const response = await apiRequest("/api/organizations");
+        const data = await readJsonResponse(response);
+
+        const ownedOrgs = data.organizations.filter(
+            (org) => org.role === "owner"
+        );
+
+        if (ownedOrgs.length === 0) {
+            return;
+        }
+
+        panel.hidden = false;
+        select.innerHTML = "";
+
+        ownedOrgs.forEach((org) => {
+            const option = document.createElement("option");
+            option.value = org.id;
+            option.textContent = org.name;
+            select.appendChild(option);
+        });
+
+        const requestedOrgId =
+            new URLSearchParams(window.location.search).get("org");
+        const requestedOrg = ownedOrgs.find(
+            (org) => String(org.id) === requestedOrgId
+        );
+        select.value = requestedOrg ? requestedOrg.id : ownedOrgs[0].id;
+
+        select.addEventListener(
+            "change",
+            () => loadOrganizationUsage(select.value)
+        );
+
+        await loadOrganizationUsage(select.value);
+
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+
 initializeUsageDashboard();
+initializeOrganizationUsage();

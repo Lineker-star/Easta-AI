@@ -1,0 +1,49 @@
+const joinButton = document.getElementById("join-button");
+const joinDescription = document.getElementById("join-description");
+const joinError = document.getElementById("join-error");
+const joinSuccess = document.getElementById("join-success");
+
+
+joinButton.addEventListener("click", async () => {
+    joinError.textContent = "";
+    joinSuccess.textContent = "";
+    joinButton.disabled = true;
+
+    try {
+        const response = await fetch(
+            `${window.BACKEND_URL}/api/organizations/join/${encodeURIComponent(window.INVITE_TOKEN)}`,
+            {
+                method: "POST",
+                credentials: "include"
+            }
+        );
+
+        if (response.status === 401) {
+            // Not logged in -- send them to log in first, then bounce
+            // right back here to finish joining. Same "next" pattern
+            // login.js/register.js use for any other protected page.
+            const next = `/join/${encodeURIComponent(window.INVITE_TOKEN)}`;
+            window.location.href = `/login?next=${encodeURIComponent(next)}`;
+            return;
+        }
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || "Could not join this organization.");
+        }
+
+        joinDescription.textContent =
+            `You've joined ${data.organization.name}.`;
+        joinSuccess.textContent = "Welcome to the team.";
+        joinButton.hidden = true;
+
+        setTimeout(() => {
+            window.location.href = "/account";
+        }, 1500);
+
+    } catch (error) {
+        joinError.textContent = error.message;
+        joinButton.disabled = false;
+    }
+});

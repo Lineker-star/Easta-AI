@@ -1,7 +1,8 @@
 import os
+import urllib.parse
 
 from dotenv import load_dotenv
-from flask import Flask, render_template, send_from_directory
+from flask import Flask, render_template, request, send_from_directory
 
 
 load_dotenv()
@@ -29,19 +30,47 @@ def health():
     }
 
 
+def _safe_next_path(raw_value):
+    """Only ever returns a same-site relative path (or None) -- used to
+    bounce a user back to whatever protected page sent them to
+    /login?next=... (e.g. an org invite link) without opening an
+    open-redirect: a value like "https://evil.example" or "//evil.example"
+    is rejected outright rather than trusted."""
+    if not raw_value:
+        return None
+
+    if not raw_value.startswith("/") or raw_value.startswith("//"):
+        return None
+
+    return raw_value
+
+
+def _google_login_url(next_path):
+    url = f"{BACKEND_URL}/api/auth/google/login"
+    if next_path:
+        url += f"?next={urllib.parse.quote(next_path)}"
+    return url
+
+
 @app.get("/login")
 def login_page():
+    next_path = _safe_next_path(request.args.get("next"))
     return render_template(
         "login.html",
         backend_url=BACKEND_URL,
+        next_path=next_path,
+        google_login_url=_google_login_url(next_path),
     )
 
 
 @app.get("/register")
 def register():
+    next_path = _safe_next_path(request.args.get("next"))
     return render_template(
         "register.html",
         backend_url=BACKEND_URL,
+        next_path=next_path,
+        google_login_url=_google_login_url(next_path),
     )
 
 
@@ -68,6 +97,36 @@ def account():
     return render_template(
         "account.html",
         backend_url=BACKEND_URL,
+    )
+
+
+@app.get("/documents")
+def documents_page():
+    # ?org=<id> preselects that organization's shared knowledge base
+    # instead of the personal one -- see the "Knowledge base" link on
+    # each org card in account.js. Not validated here (documents.js's
+    # own fetch of GET /api/organizations is the source of truth for
+    # which orgs the user actually belongs to; an invalid/foreign id
+    # here just fails to match and the dropdown falls back to Personal).
+    initial_org_id = request.args.get("org")
+    return render_template(
+        "documents.html",
+        backend_url=BACKEND_URL,
+        initial_org_id=initial_org_id,
+    )
+
+
+@app.get("/join/<invite_token>")
+def join_organization_page(invite_token):
+    # The actual join (POST /api/organizations/join/{token}) happens
+    # client-side in join.js once the button is clicked -- this route
+    # just renders the confirmation page. Deliberately not auto-joining
+    # on page load: a GET request (including one a browser or link
+    # scanner might prefetch) should never have a side effect.
+    return render_template(
+        "join.html",
+        backend_url=BACKEND_URL,
+        invite_token=invite_token,
     )
 
 

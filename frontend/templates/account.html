@@ -257,6 +257,38 @@
             </button>
         </div>
 
+        <div class="usage-panel">
+            <h2>Organizations</h2>
+
+            <p class="account-meta">
+                Share a knowledge base and combined billing with a team.
+                Conversations always stay private to you — belonging to
+                the same organization never gives members visibility
+                into each other's individual conversations.
+            </p>
+
+            <p id="organizations-error" class="error-message"></p>
+
+            <div id="organizations-list"></div>
+
+            <form id="new-organization-form" class="login-form">
+                <div class="login-field">
+                    <label for="organization-name">New organization name</label>
+                    <input
+                        type="text"
+                        id="organization-name"
+                        placeholder="e.g. Acme Corp"
+                        maxlength="100"
+                        required
+                    >
+                </div>
+
+                <button type="submit" class="btn btn-primary">
+                    Create organization
+                </button>
+            </form>
+        </div>
+
     </div>
 
     <script>

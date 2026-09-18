@@ -7,6 +7,12 @@ const authDivider = document.getElementById("auth-divider");
 const googleSigninButton = document.getElementById("google-signin-button");
 
 
+// Set server-side (frontend/app.py's login_page route) from a
+// same-site-only ?next= it already validated -- see _safe_next_path
+// there. Falls back to /chat, same as before "next" existed.
+const nextPath = loginForm.dataset.next || "/chat";
+
+
 // A failed Google sign-in redirects back here with ?error=... (see
 // GET /api/auth/google/callback in backend/app.py) -- there's no JSON
 // response to read on a full-page redirect, so the message travels as
@@ -70,7 +76,7 @@ loginForm.addEventListener("submit", async (event) => {
             );
         }
 
-        window.location.href = "/chat";
+        window.location.href = nextPath;
 
     } catch (error) {
         loginError.textContent = error.message;

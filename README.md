@@ -920,6 +920,85 @@ production traffic. Pick these up in Cursor:
     `language_message` into the new `user_id` slot and so on down the
     line — every call site rewritten to use keyword arguments instead,
     which is what should have been used there from the start.
+- **Shared team workspaces (Phase 22)** — new `organizations` /
+  `organization_members` tables, and `documents` extended so a row
+  belongs to either a `user_id` *or* an `org_id` (nullable pair, a
+  `documents_owner_check` CHECK constraint enforces exactly one is
+  set) — existing personal documents keep working completely
+  unchanged.
+  - **Explicit, documented privacy decision**: belonging to the same
+    organization does **not** give members visibility into each
+    other's individual conversations. `conversations` stays scoped to
+    `conversations.user_id` exactly as before this phase — nothing
+    about conversations changed. Organizations only ever share two
+    things: the documents (RAG knowledge base) below, and the
+    combined cost dashboard for owners. This is the safer default
+    most team tools ship (see the comment block above `organizations`
+    in `database/schema.sql`), and no reason to deviate was found.
+  - Org creation is instant (`POST /api/organizations` creates the
+    org and adds its creator as `owner` in one transaction — an org
+    can never exist with zero members). Joining is via a shareable
+    invite link (`secrets.token_urlsafe(32)`, plaintext in
+    `organizations.invite_token` — same "meant to be re-shown/
+    re-copied, and only grants limited scoped access" tradeoff as
+    conversation share tokens, not an API-key-style hashed secret),
+    landing on a new `/join/<token>` page that requires an explicit
+    button click before calling `POST
+    /api/organizations/join/{invite_token}` — deliberately not
+    auto-joining on page load, since a GET request (including one a
+    link-preview bot might prefetch) should never have a side effect.
+  - Ownership/membership is enforced with two small helpers used
+    throughout: `require_org_member()` (404, not 403, for a
+    non-member — avoids leaking whether an org id even exists to
+    someone outside it) and `require_org_owner()` (403, for a member
+    who isn't an owner). The "don't strand an org without an owner"
+    guard (`count_organization_owners()`) blocks both removing the
+    last owner and the last owner leaving.
+  - RAG retrieval (`retrieve_relevant_chunks()`) now searches both the
+    caller's personal documents and every org they belong to's shared
+    ones in one query, so answers get grounded in shared team
+    knowledge automatically — no per-turn "which knowledge base"
+    choice needed in chat itself.
+  - A user signing in via the invite flow when not already logged in
+    is bounced through `/login` (or `/register`) and back via a new
+    same-site-only `?next=` param (`_safe_next_path()` in both
+    `frontend/app.py` and `backend/app.py` — rejects anything not
+    starting with `/`, and rejects `//host`-style protocol-relative
+    values too, so this can never become an open redirect), including
+    through the Google Sign-In round trip (`oauth_next` carried in the
+    session across the whole redirect-to-Google-and-back flow).
+  - Frontend: a new "Organizations" panel on `/account` (create an
+    org, see/copy/regenerate its invite link, view members, remove a
+    member, leave), a new **Knowledge base** page at `/documents`
+    (also linked from the chat sidebar) with a Personal/org switcher
+    for adding and deleting documents — the first UI EASTA has ever
+    had for `POST /api/documents` at all, personal RAG documents were
+    API-only before this phase — and a new **Organization spend**
+    panel on `/usage` (owner-only, hidden entirely if the signed-in
+    user doesn't own any org) showing total spend/calls plus a
+    per-member breakdown (`LEFT JOIN` so a zero-usage member still
+    shows a 0/0 row instead of being silently absent).
+  - Verified via `TestClient` with DB calls mocked: all 10
+    `/api/organizations/*` routes register with no path collision
+    between the literal `/join/{token}` segment and sibling
+    `{org_id}`-based routes; non-member/non-owner 404/403 gating;
+    last-owner removal and last-owner leave are both blocked;
+    joining an org twice is a no-op (`ON CONFLICT DO NOTHING`), not an
+    error; the full Google OAuth `next` round trip (login with
+    `?next=/join/<token>` → session → callback) lands back on the
+    invite page instead of the default `/chat`; and an unsafe `next`
+    value (`https://evil.example`, `//evil.example`,
+    `javascript:alert(1)`) is stripped to empty rather than honored,
+    on both the frontend and backend validators. All new/changed
+    templates render via a local Flask dev server and every changed
+    `.py`/`.js` file passes `py_compile`/`node -c`.
+    ⚠️ **Not verified**: real browser rendering/interaction (org
+    cards, the documents page, the join flow) — only server-rendered
+    HTML and API behavior were checked, not actual JS execution in a
+    browser. No real Postgres migration was run either (see the
+    schema.sql migration note earlier in this file); apply
+    `database/schema.sql`'s new `ALTER TABLE`/`CREATE TABLE`
+    statements by hand against any existing database.
 
 ## Run locally
 
