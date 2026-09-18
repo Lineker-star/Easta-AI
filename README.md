@@ -718,6 +718,30 @@ production traffic. Pick these up in Cursor:
   - New UI strings added to all three shipped interface languages
     (`frontend/static/i18n/{en,fr,es}.json`), matching the existing
     interface-localization coverage.
+- **Real brand logo** — the placeholder "E" square (`.brand-mark`) is
+  replaced everywhere it appeared (landing/login/register/offline nav,
+  chat sidebar header + empty-chat state, usage/account/transcriptions
+  headers) with the real logo, provided as a full horizontal lockup at
+  `frontend/static/icons/Eastaai-logo.png`. Small placements use a
+  cropped, background-removed `icon-square.png` (just the circular
+  "EA" icon mark, derived from the lockup and committed alongside it)
+  rather than squeezing the full wide lockup — with its wordmark and
+  tagline — into a 40px slot where the text would be illegible. The
+  full lockup isn't used anywhere yet; there's no existing large-format
+  slot for it (the landing page has no hero-level logo placement, only
+  the same small nav-bar one every other page has), and adding one
+  wasn't asked for. `--color-accent` (the terracotta used everywhere
+  else in the UI) is unchanged — the logo's own brown/copper tones are
+  self-contained to the image itself, not reflowed into the design
+  system. Also added to the service worker's cached shell assets so
+  `offline.html` still shows the logo while genuinely offline.
+  ⚠️ Doesn't touch the separate PWA manifest icon set
+  (`icon-192.png`/`icon-512.png`/`icon-512-maskable.png`/
+  `apple-touch-icon.png`/favicons) — those are a different, unrelated
+  icon system (home-screen/install icons, not `.brand-mark`) and were
+  out of scope for this pass; swapping them for the real logo too
+  (they currently still show the old generated "E") is a reasonable
+  follow-up if wanted.
 
 ## Run locally
 

@@ -6,7 +6,7 @@
  * GET /sw.js in frontend/app.py) so it can control the whole site,
  * not just /static/. */
 
-const CACHE_NAME = "easta-shell-v3";
+const CACHE_NAME = "easta-shell-v4";
 const OFFLINE_URL = "/offline";
 
 const SHELL_ASSETS = [
@@ -15,6 +15,10 @@ const SHELL_ASSETS = [
     "/static/i18n.js",
     "/static/icons/icon-192.png",
     "/static/icons/icon-512.png",
+    // The real logo (see offline.html's .brand-mark) -- without this,
+    // the offline fallback page loaded while genuinely offline would
+    // show a broken image instead of the logo.
+    "/static/icons/icon-square.png",
     OFFLINE_URL
 ];
 

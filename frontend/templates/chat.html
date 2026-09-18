@@ -36,7 +36,11 @@
 
             <div class="sidebar-header">
                 <div class="brand-row">
-                    <span class="brand-mark">E</span>
+                    <img
+                        class="brand-mark"
+                        src="{{ url_for('static', filename='icons/icon-square.png') }}"
+                        alt="EASTA"
+                    >
                     <span class="brand-name">EASTA</span>
                 </div>
 
@@ -176,7 +180,12 @@
 
             <main class="chat-messages" id="chat-messages">
                 <div class="empty-chat">
-                    <span class="brand-mark empty-chat-mark" aria-hidden="true">E</span>
+                    <img
+                        class="brand-mark empty-chat-mark"
+                        src="{{ url_for('static', filename='icons/icon-square.png') }}"
+                        alt=""
+                        aria-hidden="true"
+                    >
                     <h2 data-i18n="empty_title">How can I help you today?</h2>
                     <p data-i18n="empty_description">
                         Send a message to begin this conversation.

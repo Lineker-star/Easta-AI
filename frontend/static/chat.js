@@ -287,9 +287,10 @@ function showEmptyState() {
     const emptyState = document.createElement("div");
     emptyState.className = "empty-chat";
 
-    const mark = document.createElement("span");
+    const mark = document.createElement("img");
     mark.className = "brand-mark empty-chat-mark";
-    mark.textContent = "E";
+    mark.src = `${window.STATIC_BASE_URL || "/static/"}icons/icon-square.png`;
+    mark.alt = "";
     mark.setAttribute("aria-hidden", "true");
 
     const heading = document.createElement("h2");

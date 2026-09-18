@@ -130,25 +130,22 @@ button {
 }
 
 /* --- shared brand mark ------------------------------------------------- */
-/* The brand-mark gradient (here and in .landing-preview-avatar.assistant
-   / .model-bar-fill below) is a fixed, always-vivid terracotta -- kept
-   hardcoded rather than theme-driven, same as a logo not changing with
-   dark mode, so it's intentionally not var(--color-*)-based. */
+/* The real logo (frontend/static/icons/icon-square.png -- the circular
+   "EA" icon cropped from the full Eastaai-logo.png horizontal lockup,
+   background removed to transparent). Fixed brown/copper tones from
+   the logo itself, same as a logo not changing with dark mode -- the
+   app's own --color-accent terracotta stays the UI accent color
+   regardless; this is intentionally not var(--color-*)-based. See
+   .landing-preview-avatar.assistant / .model-bar-fill below for the
+   separate (unrelated) always-vivid terracotta gradient used
+   elsewhere as a decorative fill, not the logo. */
 
 .brand-mark {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    display: inline-block;
     width: 40px;
     height: 40px;
-    border-radius: var(--radius-md);
-    background: linear-gradient(155deg, #D98255 0%, #B85632 100%);
-    color: #FFF9F0;
-    font-family: var(--font-display);
-    font-weight: 600;
-    font-size: 19px;
+    object-fit: contain;
     flex-shrink: 0;
-    box-shadow: var(--shadow-sm);
 }
 
 .brand-row {
@@ -1151,10 +1148,9 @@ button {
 }
 
 .empty-chat-mark {
-    display: flex;
+    display: block;
     width: 56px;
     height: 56px;
-    font-size: 26px;
     margin: 0 auto 20px;
 }
 
