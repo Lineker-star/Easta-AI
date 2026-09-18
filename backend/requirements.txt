@@ -13,3 +13,5 @@ python-docx
 python-multipart
 reportlab
 python-pptx
+mistune
+xhtml2pdf

@@ -77,6 +77,24 @@ function statusLabel(status) {
 }
 
 
+const STATUS_CLASSES = ["status-queued", "status-processing", "status-done", "status-failed"];
+
+
+function createStatusBadge(status) {
+    const badge = document.createElement("span");
+    badge.className = `status-badge status-${status}`;
+    badge.textContent = statusLabel(status);
+    return badge;
+}
+
+
+function applyStatusBadge(el, status) {
+    el.classList.remove(...STATUS_CLASSES);
+    el.classList.add("status-badge", `status-${status}`);
+    el.textContent = statusLabel(status);
+}
+
+
 chooseFilesButton.addEventListener("click", () => audioFilesInput.click());
 
 audioFilesInput.addEventListener("change", () => {
@@ -155,7 +173,7 @@ function renderJobItems(items) {
         nameCell.textContent = item.filename;
 
         const statusCell = document.createElement("td");
-        statusCell.textContent = statusLabel(item.status);
+        statusCell.appendChild(createStatusBadge(item.status));
 
         const actionCell = document.createElement("td");
 
@@ -227,7 +245,7 @@ async function refreshJobDetail() {
 
         jobDetailPanel.hidden = false;
         jobIdLabel.textContent = data.job.id;
-        jobStatusBadge.textContent = statusLabel(data.job.status);
+        applyStatusBadge(jobStatusBadge, data.job.status);
         jobProgressLabel.textContent =
             `${data.job.completed_files} / ${data.job.total_files} files processed`;
 
@@ -302,7 +320,7 @@ async function refreshJobList() {
             idCell.appendChild(link);
 
             const statusCell = document.createElement("td");
-            statusCell.textContent = statusLabel(job.status);
+            statusCell.appendChild(createStatusBadge(job.status));
 
             const progressCell = document.createElement("td");
             progressCell.textContent = `${job.completed_files} / ${job.total_files}`;

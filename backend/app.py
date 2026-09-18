@@ -1,6 +1,7 @@
 import base64
 import concurrent.futures
 import hashlib
+import html
 import io
 import json
 import mimetypes
@@ -16,11 +17,14 @@ from collections import defaultdict, deque
 from collections.abc import Generator
 from datetime import datetime
 
+import mistune
 import psycopg
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 from docx import Document as DocxDocument
-from docx.shared import Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
 from docx.shared import RGBColor as DocxRGBColor
 from dotenv import load_dotenv
 from fastapi import (
@@ -62,6 +66,7 @@ from werkzeug.security import (
     check_password_hash,
     generate_password_hash,
 )
+from xhtml2pdf import pisa
 
 
 load_dotenv()
@@ -1621,93 +1626,295 @@ def _markdown_inline_to_reportlab(text: str) -> str:
     return text
 
 
-def render_markdown_to_pdf(title: str, markdown_body: str) -> bytes:
-    """Renders a limited but common subset of Markdown (headings 1-3,
-    paragraphs, bullet lists, fenced code blocks, bold/italic/inline
-    code) to a PDF. Not a full CommonMark implementation — tables,
-    ordered lists, nested lists, and images aren't handled; anything
-    unrecognized falls back to a plain paragraph. Good enough for
-    model-generated reports/notes; swap for a proper Markdown->HTML
-    parser + xhtml2pdf if you need full coverage."""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=LETTER,
-        topMargin=0.9 * inch,
-        bottomMargin=0.9 * inch,
-        leftMargin=0.9 * inch,
-        rightMargin=0.9 * inch,
-        title=title,
+# --- Full Markdown -> PDF/DOCX, sharing one parse (Phase 15) ---------------
+# render_markdown_to_pdf()/render_markdown_to_docx() below used to hand-map
+# a narrow Markdown subset directly to reportlab Flowables / python-docx
+# calls line-by-line (no tables, nested lists, or images -- see git history
+# if you need the old version back). Both now go through one real Markdown
+# parser (mistune) into an HTML tree once, and drive their own renderer
+# from that same tree, so PDF and DOCX output can't drift apart the way two
+# independent hand-rolled walkers eventually do. render_structured_pdf() /
+# render_structured_docx() below (the separate create_document tool, a
+# structured-JSON-sections content model rather than raw Markdown) are
+# untouched and still use reportlab / _markdown_inline_to_reportlab() /
+# _add_markdown_runs() directly -- deliberately a different tool, not
+# consolidated here.
+#
+# PDF renders via xhtml2pdf (HTML+CSS -> PDF): chosen over WeasyPrint
+# (which the underlying "Suggested next steps" note originally pointed at)
+# because WeasyPrint requires native Pango/cairo/GTK libraries that not
+# every deployment target has preinstalled (confirmed: it fails to import
+# with a missing-libgobject error on a plain pip install on Windows,
+# without the GTK3 runtime separately installed) -- xhtml2pdf is pure
+# Python, works identically everywhere reportlab already did, and still
+# gets tables/nested lists/images "for free" from HTML+CSS the same way.
+# If your deployment target can guarantee the native libs (most Linux
+# server images can, via apt), swapping the PDF half for WeasyPrint is a
+# reasonable follow-up -- the shared markdown_to_soup() parse and the DOCX
+# renderer don't need to change either way.
+_MARKDOWN_TO_HTML = mistune.create_markdown(
+    escape=False,
+    plugins=["table", "strikethrough", "task_lists", "url"],
+)
+
+
+def markdown_to_soup(markdown_body: str) -> BeautifulSoup:
+    """The single parse both render_markdown_to_pdf() and
+    render_markdown_to_docx() are driven from. DOCX walks this tree as
+    it comes back; the PDF path takes a further pass (see
+    _prepare_pdf_html()) for a couple of xhtml2pdf-specific rendering
+    gaps that don't apply to python-docx."""
+    parsed_html = _MARKDOWN_TO_HTML(markdown_body or "")
+    return BeautifulSoup(parsed_html, "html.parser")
+
+
+def _body_starts_with_heading(soup: BeautifulSoup) -> bool:
+    first_tag = soup.find(True)
+    return first_tag is not None and first_tag.name in ("h1", "h2", "h3")
+
+
+_LONG_TOKEN_RE = re.compile(r"\S{60,}")
+
+
+def _break_long_tokens(text: str, breaker: str, chunk_size: int = 60) -> str:
+    """xhtml2pdf implements neither `word-break` nor `overflow-wrap` --
+    confirmed by testing: a single unbroken run of 60+ non-space
+    characters (a long URL, hash, minified line, ...) doesn't get
+    clipped or raise an error, it silently renders past the page's
+    right margin. Inserts a real break every chunk_size characters into
+    any such run so it wraps like normal text does; short tokens and
+    ordinary prose are left untouched. `breaker` is "\\n" inside a <pre>
+    (where whitespace is preserved by `white-space: pre-wrap`) and a
+    plain " " everywhere else (a literal "\\n" there would just get
+    collapsed back to nothing by normal HTML whitespace handling and
+    never actually break the line)."""
+
+    def repl(match):
+        token = match.group(0)
+        return breaker.join(
+            token[i : i + chunk_size] for i in range(0, len(token), chunk_size)
+        )
+
+    return _LONG_TOKEN_RE.sub(repl, text)
+
+
+_PDF_BULLET_CHARS = ["•", "◦", "▪"]
+
+
+def _ul_nesting_depth(tag: Tag) -> int:
+    return sum(
+        1 for parent in tag.parents if isinstance(parent, Tag) and parent.name == "ul"
     )
 
-    styles = getSampleStyleSheet()
-    body_style = styles["BodyText"]
-    code_style = ParagraphStyle(
-        "Code",
-        parent=styles["Code"],
-        fontSize=9,
-        leading=12,
-    )
 
-    story = [
-        Paragraph(_markdown_inline_to_reportlab(title), styles["Title"]),
-        Spacer(1, 0.25 * inch),
-    ]
+def _prepare_pdf_html(soup: BeautifulSoup) -> str:
+    """Two xhtml2pdf-specific fixups, applied to a fresh copy of the
+    tree so they never leak into the shared soup the DOCX path also
+    reads:
+    1. Long-token wrapping (_break_long_tokens), everywhere.
+    2. Manual <ul> bullet markers: xhtml2pdf's native disc marker
+       doesn't survive registering a custom @font-face body font --
+       confirmed via pypdf text extraction, it comes back as a
+       replacement-character glyph instead of a bullet. Rendered as a
+       literal, nesting-depth-aware character instead (with
+       `list-style-type: none` in the CSS below to suppress the native
+       one) -- that's just ordinary text in the already-embedded Inter
+       font. <ol> numbering is unaffected by this and needs no
+       workaround; it already renders correctly."""
+    soup = BeautifulSoup(str(soup), "html.parser")
 
-    lines = markdown_body.splitlines()
-    index = 0
-    list_buffer: list[str] = []
+    for pre in soup.find_all("pre"):
+        for text_node in pre.find_all(string=True):
+            wrapped = _break_long_tokens(str(text_node), breaker="\n")
+            if wrapped != str(text_node):
+                text_node.replace_with(wrapped)
 
-    def flush_list():
-        if not list_buffer:
-            return
-        story.append(ListFlowable(
-            [
-                ListItem(Paragraph(_markdown_inline_to_reportlab(item), body_style))
-                for item in list_buffer
-            ],
-            bulletType="bullet",
-        ))
-        list_buffer.clear()
-
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            flush_list()
-            code_lines = []
-            index += 1
-            while index < len(lines) and not lines[index].strip().startswith("```"):
-                code_lines.append(lines[index])
-                index += 1
-            story.append(Preformatted("\n".join(code_lines), code_style))
-            index += 1
+    for text_node in soup.find_all(string=True):
+        if text_node.find_parent("pre") is not None:
             continue
+        wrapped = _break_long_tokens(str(text_node), breaker=" ")
+        if wrapped != str(text_node):
+            text_node.replace_with(wrapped)
 
-        if stripped.startswith("### "):
-            flush_list()
-            story.append(Paragraph(_markdown_inline_to_reportlab(stripped[4:]), styles["Heading3"]))
-        elif stripped.startswith("## "):
-            flush_list()
-            story.append(Paragraph(_markdown_inline_to_reportlab(stripped[3:]), styles["Heading2"]))
-        elif stripped.startswith("# "):
-            flush_list()
-            story.append(Paragraph(_markdown_inline_to_reportlab(stripped[2:]), styles["Heading1"]))
-        elif stripped.startswith("- ") or stripped.startswith("* "):
-            list_buffer.append(stripped[2:])
-        elif not stripped:
-            flush_list()
-            story.append(Spacer(1, 0.12 * inch))
-        else:
-            flush_list()
-            story.append(Paragraph(_markdown_inline_to_reportlab(stripped), body_style))
+    for ul in soup.find_all("ul"):
+        marker = _PDF_BULLET_CHARS[
+            min(_ul_nesting_depth(ul), len(_PDF_BULLET_CHARS) - 1)
+        ]
+        for li in ul.find_all("li", recursive=False):
+            li.insert(0, NavigableString(f"{marker}  "))
 
-        index += 1
+    return str(soup)
 
-    flush_list()
-    doc.build(story)
 
+# Bundled here (backend/assets/fonts/) rather than relying on default PDF
+# fonts, which reportlab/xhtml2pdf can't reach Google Fonts for at render
+# time the way a browser's @import can -- same Inter/Fraunces families as
+# frontend/static/styles.css, downloaded as static-weight .ttf files.
+DOCUMENT_FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+
+
+def _pdf_font_face_css() -> str:
+    faces = [
+        ("Inter", "normal", "normal", "Inter-Regular.ttf"),
+        ("Inter", "bold", "normal", "Inter-Bold.ttf"),
+        ("Inter", "normal", "italic", "Inter-Italic.ttf"),
+        ("Inter-Bold", "normal", "normal", "Inter-Bold.ttf"),
+        ("Inter-SemiBold", "normal", "normal", "Inter-SemiBold.ttf"),
+        ("Fraunces-Medium", "normal", "normal", "Fraunces-Medium.ttf"),
+        ("Fraunces-SemiBold", "normal", "normal", "Fraunces-SemiBold.ttf"),
+    ]
+    rules = [
+        f'@font-face {{ font-family: "{family}"; '
+        f'src: url("{DOCUMENT_FONTS_DIR}/{filename}"); '
+        f"font-weight: {weight}; font-style: {style}; }}"
+        for family, weight, style, filename in faces
+    ]
+    return "\n".join(rules)
+
+
+# Terracotta brand accent + neutrals, matching frontend/static/styles.css
+# (--color-accent / --color-accent-hover / --color-text-muted /
+# --color-border / --color-bg-soft) -- same values _ACCENT_HEX and friends
+# below use for the structured-document renderers, duplicated here as
+# plain hex since this runs earlier in the file and CSS wants raw strings
+# rather than reportlab/docx color objects anyway.
+_PDF_DOCUMENT_CSS = """
+@page {
+    size: letter;
+    margin: 1in 0.9in 0.85in 0.9in;
+    @frame footer_frame {
+        -pdf-frame-content: footer_content;
+        left: 0.9in; right: 0.9in; bottom: 0.35in; height: 0.35in;
+    }
+}
+body {
+    font-family: "Inter";
+    font-size: 10.5pt;
+    line-height: 1.5;
+    color: #2A2622;
+}
+#footer_content {
+    text-align: center;
+    font-size: 8.5pt;
+    color: #6F6558;
+}
+h1, h2, h3 {
+    color: #2A2622;
+    margin-top: 18pt;
+    margin-bottom: 6pt;
+}
+h1 { font-family: "Fraunces-SemiBold"; font-size: 20pt; }
+h2 { font-family: "Fraunces-Medium"; font-size: 15pt; }
+h3 { font-family: "Fraunces-Medium"; font-size: 12.5pt; }
+p { margin: 0 0 8pt 0; }
+ul, ol { margin: 0 0 8pt 0; padding-left: 18pt; }
+ul { list-style-type: none; }
+li { margin-bottom: 3pt; }
+table {
+    width: 100%;
+    margin: 4pt 0 10pt 0;
+    font-size: 9.5pt;
+}
+th, td {
+    border: 0.75pt solid #D8CBAF;
+    padding: 5pt 7pt;
+    text-align: left;
+}
+th {
+    background-color: #F1EADC;
+    font-family: "Inter-SemiBold";
+    color: #AD5731;
+}
+pre {
+    background-color: #F1EADC;
+    border: 0.75pt solid #D8CBAF;
+    padding: 8pt;
+    margin: 0 0 10pt 0;
+    font-family: "Courier";
+    font-size: 8.5pt;
+    white-space: pre-wrap;
+}
+code {
+    font-family: "Courier";
+    font-size: 9pt;
+    background-color: #F1EADC;
+}
+blockquote {
+    margin: 0 0 8pt 0;
+    padding-left: 10pt;
+    border-left: 2pt solid #C4693E;
+    color: #6F6558;
+}
+a { color: #AD5731; }
+strong { font-family: "Inter-Bold"; }
+em { font-family: "Inter"; font-style: italic; }
+img { max-width: 100%; }
+.title-page {
+    page-break-after: always;
+    text-align: center;
+    padding-top: 2.6in;
+}
+.title-page h1 {
+    font-family: "Fraunces-SemiBold";
+    font-size: 30pt;
+    margin-bottom: 10pt;
+}
+.title-page .subtitle {
+    font-family: "Inter";
+    font-size: 11pt;
+    color: #6F6558;
+}
+"""
+
+# A ~2-page threshold, estimated from character count rather than an
+# actual page-layout pass (nothing renders a preview page count ahead of
+# the real xhtml2pdf call) -- generous enough that short documents never
+# get an unnecessary title page, conservative enough that most documents
+# genuinely running past 2 pages get one.
+MIN_CHARS_FOR_DOCUMENT_TITLE_PAGE = 2800
+
+
+def render_markdown_to_pdf(title: str, markdown_body: str) -> bytes:
+    soup = markdown_to_soup(markdown_body)
+    safe_title = html.escape(title)
+    already_has_heading = _body_starts_with_heading(soup)
+    body_html = _prepare_pdf_html(soup)
+
+    needs_title_page = len(markdown_body or "") > MIN_CHARS_FOR_DOCUMENT_TITLE_PAGE
+
+    title_page_html = ""
+    heading_html = ""
+    if needs_title_page:
+        # The title page always shows the title once, on its own page
+        # -- the body's own first heading (if any) then opens the next
+        # page normally, no dedup needed there.
+        title_page_html = (
+            f'<div class="title-page"><h1>{safe_title}</h1>'
+            f'<div class="subtitle">Generated by EASTA</div></div>'
+        )
+    elif not already_has_heading:
+        # Short document, no title page: inject the title as the
+        # visible heading -- but only if the model's own Markdown
+        # doesn't already open with one, otherwise this doubles up
+        # ("Report" / "Report") right at the top with no separation
+        # between them (confirmed reproducible without this check).
+        heading_html = f"<h1>{safe_title}</h1>"
+
+    full_html = f"""<html><head><style>
+{_pdf_font_face_css()}
+{_PDF_DOCUMENT_CSS}
+</style></head>
+<body>
+{title_page_html}
+{heading_html}
+{body_html}
+<div id="footer_content">Page <pdf:pagenumber /> of <pdf:pagecount /></div>
+</body></html>"""
+
+    buffer = io.BytesIO()
+    result = pisa.CreatePDF(full_html, dest=buffer)
+    if result.err:
+        raise RuntimeError(f"PDF generation failed with {result.err} error(s)")
     return buffer.getvalue()
 
 
@@ -1730,51 +1937,187 @@ def _add_markdown_runs(paragraph, text: str):
             paragraph.add_run(token)
 
 
-def render_markdown_to_docx(title: str, markdown_body: str) -> bytes:
-    """DOCX counterpart to render_markdown_to_pdf() — same limited
-    Markdown subset (headings 1-3, paragraphs, bullet/numbered lists,
-    fenced code blocks, bold/italic/inline code)."""
-    document = DocxDocument()
-    document.add_heading(title, level=0)
+def _docx_shade_cell(cell, hex_color: str):
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:val"), "clear")
+    shading.set(qn("w:color"), "auto")
+    shading.set(qn("w:fill"), hex_color)
+    cell._tc.get_or_add_tcPr().append(shading)
 
-    lines = markdown_body.splitlines()
-    index = 0
 
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            code_lines = []
-            index += 1
-            while index < len(lines) and not lines[index].strip().startswith("```"):
-                code_lines.append(lines[index])
-                index += 1
-            run = document.add_paragraph().add_run("\n".join(code_lines))
-            run.font.name = "Courier New"
-            run.font.size = Pt(9)
-            index += 1
+def _docx_walk_inline(paragraph, node, bold=False, italic=False, code=False, strike=False):
+    """Recursively adds runs to a docx paragraph for a parsed HTML
+    node's inline content (headings, paragraphs, list items, table
+    cells, blockquotes all go through this) -- composes nested
+    bold/italic/code/strike correctly (e.g. **_both_** inside `code`)
+    since the active styles are threaded down as arguments rather than
+    reset at each tag."""
+    for child in node.children:
+        if isinstance(child, NavigableString):
+            text = str(child)
+            if not text:
+                continue
+            run = paragraph.add_run(text)
+            run.bold = bold or None
+            run.italic = italic or None
+            if strike:
+                run.font.strike = True
+            if code:
+                run.font.name = "Courier New"
+                run.font.size = Pt(9.5)
             continue
 
-        if stripped.startswith("### "):
-            document.add_heading(stripped[4:], level=3)
-        elif stripped.startswith("## "):
-            document.add_heading(stripped[3:], level=2)
-        elif stripped.startswith("# "):
-            document.add_heading(stripped[2:], level=1)
-        elif stripped.startswith("- ") or stripped.startswith("* "):
-            _add_markdown_runs(
-                document.add_paragraph(style="List Bullet"), stripped[2:]
-            )
-        elif re.match(r"^\d+\.\s", stripped):
-            _add_markdown_runs(
-                document.add_paragraph(style="List Number"),
-                re.sub(r"^\d+\.\s", "", stripped),
-            )
-        elif stripped:
-            _add_markdown_runs(document.add_paragraph(), stripped)
+        if not isinstance(child, Tag):
+            continue
 
-        index += 1
+        tag = child.name
+        if tag in ("strong", "b"):
+            _docx_walk_inline(paragraph, child, True, italic, code, strike)
+        elif tag in ("em", "i"):
+            _docx_walk_inline(paragraph, child, bold, True, code, strike)
+        elif tag == "code":
+            _docx_walk_inline(paragraph, child, bold, italic, True, strike)
+        elif tag in ("del", "s"):
+            _docx_walk_inline(paragraph, child, bold, italic, code, True)
+        elif tag == "br":
+            paragraph.add_run().add_break()
+        elif tag == "a":
+            text = child.get_text()
+            href = child.get("href", "")
+            label = f"{text} ({href})" if href and href != text else text
+            run = paragraph.add_run(label)
+            run.bold = bold or None
+            run.italic = italic or None
+            run.font.color.rgb = DOCX_ACCENT
+            run.underline = True
+        elif tag in ("ul", "ol"):
+            # A nested list inside this <li> -- rendered as its own
+            # paragraphs by _docx_render_list's caller, not flattened
+            # into this inline run (this exact bug -- nested-list text
+            # duplicated into both its own paragraphs and its parent
+            # li's paragraph -- was caught and fixed during testing).
+            continue
+        else:
+            _docx_walk_inline(paragraph, child, bold, italic, code, strike)
+
+
+_DOCX_LIST_STYLES_BULLET = ["List Bullet", "List Bullet 2", "List Bullet 3"]
+_DOCX_LIST_STYLES_NUMBER = ["List Number", "List Number 2", "List Number 3"]
+
+
+def _docx_render_list(document, list_tag, level=0):
+    ordered = list_tag.name == "ol"
+    styles = _DOCX_LIST_STYLES_NUMBER if ordered else _DOCX_LIST_STYLES_BULLET
+    style_name = styles[min(level, len(styles) - 1)]
+
+    for li in list_tag.find_all("li", recursive=False):
+        content_source = li.find("p", recursive=False) or li
+        paragraph = document.add_paragraph(style=style_name)
+        _docx_walk_inline(paragraph, content_source)
+
+        for nested in li.find_all(["ul", "ol"], recursive=False):
+            _docx_render_list(document, nested, level=level + 1)
+
+
+def _docx_render_table(document, table_tag):
+    rows = table_tag.find_all("tr")
+    if not rows:
+        return
+
+    column_count = max(len(row.find_all(["th", "td"])) for row in rows)
+    table = document.add_table(rows=0, cols=column_count)
+    table.style = "Table Grid"
+
+    for row_index, row in enumerate(rows):
+        cells = row.find_all(["th", "td"])
+        is_header = row_index == 0 and row.find("th") is not None
+        docx_row = table.add_row()
+
+        for col_index in range(column_count):
+            docx_cell = docx_row.cells[col_index]
+            if col_index >= len(cells):
+                continue
+            paragraph = docx_cell.paragraphs[0]
+            _docx_walk_inline(paragraph, cells[col_index])
+            if is_header:
+                for run in paragraph.runs:
+                    run.bold = True
+                    run.font.color.rgb = DOCX_ACCENT_DARK
+                _docx_shade_cell(docx_cell, "F1EADC")
+
+
+def _docx_add_image(document, img_tag):
+    src = img_tag.get("src", "")
+    if not src:
+        return
+    try:
+        response = requests.get(src, timeout=8, stream=True)
+        response.raise_for_status()
+        data = response.content[: 8 * 1024 * 1024]
+        document.add_picture(io.BytesIO(data), width=Inches(5.5))
+    except Exception:
+        alt = img_tag.get("alt") or "image"
+        placeholder = document.add_paragraph(f"[image: {alt}]")
+        for run in placeholder.runs:
+            run.italic = True
+
+
+def _docx_render_block(document, node):
+    for child in node.children:
+        if isinstance(child, NavigableString):
+            continue
+        if not isinstance(child, Tag):
+            continue
+
+        tag = child.name
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            heading = document.add_heading(level=int(tag[1]))
+            _docx_walk_inline(heading, child)
+        elif tag == "p":
+            images = child.find_all("img")
+            if images:
+                for img in images:
+                    _docx_add_image(document, img)
+                if child.get_text().strip():
+                    _docx_walk_inline(document.add_paragraph(), child)
+            else:
+                _docx_walk_inline(document.add_paragraph(), child)
+        elif tag in ("ul", "ol"):
+            _docx_render_list(document, child, level=0)
+        elif tag == "table":
+            _docx_render_table(document, child)
+        elif tag == "pre":
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.left_indent = Inches(0.2)
+            run = paragraph.add_run(child.get_text().rstrip("\n"))
+            run.font.name = "Courier New"
+            run.font.size = Pt(9)
+        elif tag == "blockquote":
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.left_indent = Inches(0.3)
+            content_source = child.find("p", recursive=False) or child
+            _docx_walk_inline(paragraph, content_source)
+            for run in paragraph.runs:
+                run.italic = True
+                run.font.color.rgb = DOCX_MUTED
+        elif tag == "hr":
+            document.add_paragraph("—" * 20)
+        elif tag == "img":
+            _docx_add_image(document, child)
+        else:
+            _docx_render_block(document, child)
+
+
+def render_markdown_to_docx(title: str, markdown_body: str) -> bytes:
+    soup = markdown_to_soup(markdown_body)
+
+    document = DocxDocument()
+    if not _body_starts_with_heading(soup):
+        # Same dedup as render_markdown_to_pdf(): don't show the title
+        # twice when the model's own Markdown already opens with an H1.
+        document.add_heading(title, level=0)
+
+    _docx_render_block(document, soup)
 
     buffer = io.BytesIO()
     document.save(buffer)

@@ -143,13 +143,13 @@ production traffic. Pick these up in Cursor:
   version history yet. Generated files live in a new
   `generated_files` table and are served via
   `GET /api/generated/{id}/download`. Gate the whole feature with
-  `EASTA_ENABLE_GENERATION`. ⚠️ **Prototype-grade**: the Markdown→PDF/
-  DOCX renderers cover a common but limited subset (headings 1-3,
-  paragraphs, bullet/numbered lists, fenced code blocks, bold/italic/
-  inline code — no tables, images, or nested lists); generated files
-  are stored as raw bytes in Postgres, the same prototype-grade
-  tradeoff as `messages.attachments` — swap for object storage before
-  relying on this at real scale.
+  `EASTA_ENABLE_GENERATION`. The Markdown→PDF/DOCX renderers
+  (`render_markdown_to_pdf()` / `render_markdown_to_docx()` in
+  `backend/app.py`) were rewritten in Phase 15 — see that entry below
+  for what changed. ⚠️ **Still prototype-grade**: generated files are
+  stored as raw bytes in Postgres, the same tradeoff as
+  `messages.attachments` — swap for object storage before relying on
+  this at real scale.
 - **Voice: speech-to-text and text-to-speech** — a 🎤 mic button in
   the composer transcribes speech into the message box, and a **🔊
   Read aloud** button on every assistant reply speaks it. Both prefer
@@ -401,6 +401,143 @@ production traffic. Pick these up in Cursor:
     from the document-generation work). Individual transcripts are
     also viewable inline per-item on the job page without downloading
     anything.
+- **Design pass 2.0** — a polish/consistency pass across
+  `frontend/static/styles.css`, not a new feature:
+  - **Micro-interactions**: messages fade/slide in as they're added,
+    the canvas panel and the composer's mobile "more options" popover
+    animate open, the dark-mode toggle icon does a quick flip on
+    switch, and icon/toggle buttons get a small press animation —
+    all 150-300ms, all skippable design-token-driven CSS (`animation`/
+    `transition`), no new JS dependencies.
+  - **Dark-mode contrast**: code blocks (`.assistant-message pre` /
+    `.canvas-body pre`) were nearly the same shade as the dark theme's
+    assistant bubble/canvas surface and are now darkened for clear
+    separation; the `/usage` model-breakdown bars got a subtle track
+    border for the same reason.
+  - **Status badges**: transcription jobs and their individual files
+    used to all show the same neutral accent pill regardless of
+    queued/processing/done/failed — now color-coded (`.status-badge`
+    + `.status-queued/-processing/-done/-failed` in styles.css, wired
+    up in `transcriptions.js`), including a new `--color-success-soft`
+    token added alongside the existing `--color-danger-soft` /
+    `--color-accent-soft` so "done" has a real background color
+    instead of reusing an unrelated one.
+  - **Token cleanup**: a few hardcoded `border-radius` values (5px/6px
+    on inline code, the copy-code button, and attachment image
+    thumbnails) were unified onto `var(--radius-sm)`, and two stray
+    inline `style="..."` attributes (in `usage.html`, `login.html`,
+    `register.html`) were replaced with proper classes
+    (`.usage-footnote`, and a `.login-switch + .login-switch` rule for
+    the stacked "back to home" line).
+- **Responsiveness pass 2.0** — touch-interaction quality on top of
+  Phase 12's breakpoint layout fixes, all in
+  `frontend/static/styles.css`:
+  - **Fixed a real touch bug**: `.message-actions` (edit/regenerate/
+    copy under each message) only became visible on `:hover` — on a
+    touchscreen, which has no hover state at all, this left them
+    permanently invisible and undiscoverable, not just harder to
+    reach. Now forced visible under `@media (hover: none)`.
+  - **Fixed a real layout bug**: `.conversation-list` (the sidebar's
+    scrollable chat history) was missing `min-height: 0`, the classic
+    flexbox fix that lets a `flex: 1` + `overflow: auto` item actually
+    shrink below its content height — without it, a long history on a
+    short mobile viewport could push the sidebar footer (dark mode
+    toggle, Account, Bulk transcription, Install app) off the bottom
+    of the fixed-height drawer instead of scrolling internally.
+  - **Touch target sizing**: a new `@media (pointer: coarse)` block
+    (touch-primary devices only — desktop mouse/trackpad keeps the
+    denser layout) gives every icon button, message action button, and
+    close button a real ~44x44px hit area via `min-width`/
+    `min-height`, per Apple HIG / Material / WCAG 2.5.5. A few buttons
+    that relied on default text centering (`.sidebar-close`,
+    `.canvas-close-button`, the attachment-chip remove button) also
+    got explicit flex centering so the glyph doesn't drift toward one
+    corner of the now-larger tap target.
+  - **Canvas panel on mobile**: already became a full-screen sheet
+    (not a squeezed side panel) at the ≤700px breakpoint added in
+    Phase 12 — confirmed this is still correct, and bumped its z-index
+    above the sidebar drawer's so it reliably wins if both are ever
+    triggered at once.
+  - **Composer crowding at 360-390px width**: confirmed by measuring
+    the collapsed layout at that width — the ≤560px "more options"
+    popover from Phase 12 already collapses attach/research/image-
+    style/mic together, leaving only the more-button, textarea, and
+    send button inline (~90px fixed width against ~310px of available
+    composer width), which is comfortably uncrowded. No change needed.
+  - ⚠️ **Not physically tested**: everything above was verified by
+    reading rendered HTML/CSS and doing the layout arithmetic by hand
+    (no real browser or touch device is available in this environment)
+    — test on an actual phone, and with the OS "larger text"
+    accessibility setting on, before treating this as fully verified.
+    A code-level audit for OS text-scaling found no `overflow: hidden`
+    region holding real text content (the few fixed-height regions
+    that exist hold icons/images/charts, or already use
+    `overflow: auto`) and no `user-scalable=no` / `maximum-scale`
+    blocking zoom, but that's a review, not a device test.
+- **Fixed document generation quality** — `generate_document`'s
+  `render_markdown_to_pdf()` / `render_markdown_to_docx()`
+  (`backend/app.py`) no longer hand-map Markdown tokens to reportlab
+  Flowables / python-docx calls line-by-line. Both now share one real
+  parse: `markdown_to_soup()` runs the model's Markdown through
+  `mistune` (with the `table`/`strikethrough`/`task_lists`/`url`
+  plugins) into an HTML tree once, and each renderer walks that same
+  tree — so PDF and DOCX output can't silently drift apart the way two
+  independent hand-rolled walkers eventually do, and tables, nested
+  lists, and images are no longer dropped.
+  - **PDF** now renders via `xhtml2pdf` (HTML+CSS → PDF, styled with
+    the EASTA terracotta/Fraunces identity) instead of reportlab
+    Flowables — real page margins, a title page for anything over
+    ~2 pages (character-count heuristic —
+    `MIN_CHARS_FOR_DOCUMENT_TITLE_PAGE`), a "Page X of Y" footer on
+    every page, distinct H1/H2/H3 sizes/weights, and code blocks that
+    wrap long lines instead of running off the page edge.
+    ⚠️ **Chose `xhtml2pdf` over WeasyPrint**, which the original
+    prototype-grade note suggested: WeasyPrint needs native
+    Pango/cairo/GTK libraries that aren't guaranteed on every
+    deployment target (confirmed — it fails to import with a
+    missing-`libgobject` error on a plain `pip install` without the
+    GTK3 runtime separately installed) — `xhtml2pdf` is pure Python,
+    so it works the same way reportlab always did, at the cost of a
+    less complete CSS implementation than a real browser engine (two
+    gaps found and worked around during testing: it doesn't wrap a
+    single 60+ character unbroken run at all — worked around by
+    inserting a real break into any such run before rendering — and
+    its native `<ul>` bullet marker didn't survive registering a
+    custom `@font-face` body font, replaced with a literal, nesting-
+    depth-aware bullet character instead). If your deployment target
+    can guarantee the native libs (most Linux server images can, via
+    `apt`), swapping the PDF half for WeasyPrint is a reasonable
+    follow-up.
+  - **DOCX** extends `python-docx` with real table support
+    (`add_table`, header row shaded in the brand accent), multi-level
+    nested lists (Word's built-in `List Bullet`/`List Bullet 2`/
+    `List Bullet 3` and `List Number` styles, up to 3 levels), and
+    inline images (`add_picture`, fetched from the image's URL with an
+    8-second timeout and an 8&nbsp;MB cap — a fetch failure falls back
+    to an `[image: alt text]` placeholder paragraph rather than
+    failing the whole document).
+  - **Fonts**: actual Inter/Fraunces weights (the same families
+    `frontend/static/styles.css` uses) are bundled as static `.ttf`
+    files in `backend/assets/fonts/` and embedded via `@font-face` —
+    reportlab/xhtml2pdf can't reach Google Fonts at render time the
+    way a browser's `@import` can. OFL license files for both
+    (`OFL-Inter.txt`, `OFL-Fraunces.txt`) are included alongside them.
+  - **Verified with a real test document** exercising every gap this
+    phase closed (H1-H3, bold/italic/inline code, a nested bullet
+    list, a nested numbered list, a table, a fenced code block, a
+    blockquote, a working image, and a broken-image-URL fallback) —
+    checked structurally (page count, embedded/subsetted font names,
+    extracted text, table cell contents, run-level bold/italic flags,
+    embedded image byte-for-byte size match) since no PDF/DOCX viewer
+    is available in this environment to confirm the visual layout by
+    eye; do that before treating this as fully done.
+  - `render_structured_pdf()` / `render_structured_docx()` /
+    `render_structured_pptx()` (the separate `create_document` tool,
+    a structured-JSON-sections content model rather than raw
+    Markdown) are untouched by this phase and still render via
+    reportlab / `_markdown_inline_to_reportlab()` /
+    `_add_markdown_runs()` directly — deliberately a different tool,
+    not consolidated into the above.
 
 ## Run locally
 
@@ -801,9 +938,11 @@ application.
   above.
 - Add canvas version history / undo instead of each generation
   overwriting the conversation's one `canvas_artifacts` row.
-- Extend `render_markdown_to_pdf()` / `render_markdown_to_docx()` to
-  cover tables, images, and nested lists (or swap in a proper
-  Markdown->HTML parser + `xhtml2pdf` for fuller CommonMark coverage).
+- If your deployment target can guarantee the native Pango/cairo/GTK
+  libraries (most Linux server images can, via `apt`), consider
+  swapping `render_markdown_to_pdf()`'s `xhtml2pdf` backend for
+  WeasyPrint for fuller CSS/CommonMark coverage (see the Phase 15
+  entry above for why `xhtml2pdf` was chosen instead this round).
 - Replace TTS's flat per-character cost estimate
   (`TTS_FALLBACK_COST_USD_PER_1K_CHARS`) with a real per-call cost
   once you confirm how OpenRouter reports one for

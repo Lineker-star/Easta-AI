@@ -214,6 +214,10 @@ function setTheme(theme) {
 
 themeToggleButton.addEventListener("click", () => {
     setTheme(getCurrentTheme() === "dark" ? "light" : "dark");
+
+    themeToggleIcon.classList.remove("theme-icon-flip");
+    void themeToggleIcon.offsetWidth;
+    themeToggleIcon.classList.add("theme-icon-flip");
 });
 
 
@@ -283,12 +287,18 @@ function showEmptyState() {
     const emptyState = document.createElement("div");
     emptyState.className = "empty-chat";
 
+    const mark = document.createElement("span");
+    mark.className = "brand-mark empty-chat-mark";
+    mark.textContent = "E";
+    mark.setAttribute("aria-hidden", "true");
+
     const heading = document.createElement("h2");
     heading.textContent = t("empty_title");
 
     const description = document.createElement("p");
     description.textContent = t("empty_description");
 
+    emptyState.appendChild(mark);
     emptyState.appendChild(heading);
     emptyState.appendChild(description);
 
