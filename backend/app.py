@@ -1128,6 +1128,51 @@ _COMPLEXITY_KEYWORDS = (
     "calculate", "compute",
 )
 
+# Correctness fix, not a complexity tweak: FAST_MODEL is never in
+# TOOL_CAPABLE_MODELS below (see that comment), so a short message like
+# "Generate the pdf containing this" or "make that into slides" — too
+# short/plain to trip any _COMPLEXITY_KEYWORDS above — used to route to
+# FAST_MODEL, which then had literally no tools available (not
+# create_document, not generate_image, none of them) and fell back to
+# its own base-training refusal ("I can't generate files...") instead
+# of ever reaching a model that actually has the tool. These keywords
+# force that class of request onto a tool-capable model regardless of
+# length. English file-format tokens (pdf/docx/pptx) are kept
+# unmodified across languages since they're commonly used as loanwords
+# even in non-English messages; the verbs and the higher-level nouns
+# (word doc, presentation, slides, image, ...) are translated for the
+# 11 languages EASTA_SYSTEM_PROMPT below claims fluency in.
+_GENERATION_KEYWORDS = (
+    # verbs: generate/create/make/turn-into/convert
+    "generate", "create", "make", "produce", "turn this into",
+    "turn that into", "convert this", "convert that",
+    "générer", "créer", "crée", "fais",
+    "generar", "crear", "crea", "haz",
+    "erstelle", "erstellen", "generiere", "generieren",
+    "生成", "创建", "制作",
+    "создай", "создать", "сгенерируй", "сгенерировать",
+    "gerar", "criar", "crie", "faça",
+    "作成", "作って",
+    "생성", "만들어", "작성",
+    "genera", "generare", "creare",
+    "genereer", "maak", "creëer",
+    # file-format nouns (language-agnostic loanwords)
+    "pdf", "docx", "pptx",
+    # higher-level nouns: word doc / presentation / slides / image
+    "word doc", "powerpoint", "presentation", "slides", "slideshow",
+    "image", "picture", "photo", "logo",
+    "document word", "présentation", "diapositives",
+    "documento word", "presentación", "diapositivas", "imagen",
+    "word-dokument", "präsentation", "folien", "bild",
+    "word文档", "演示文稿", "幻灯片", "图片", "图像",
+    "документ word", "презентация", "слайды", "изображение", "картинка",
+    "documento word", "apresentação", "imagem",
+    "word文書", "プレゼンテーション", "スライド", "パワーポイント", "画像",
+    "워드 문서", "프레젠테이션", "슬라이드", "파워포인트", "이미지",
+    "documento word", "presentazione", "diapositive", "immagine",
+    "word-document", "presentatie", "dia's", "afbeelding",
+)
+
 
 def pick_model(message: str) -> str:
     text = message.lower()
@@ -1137,6 +1182,7 @@ def pick_model(message: str) -> str:
         word_count > 40
         or "```" in message
         or any(keyword in text for keyword in _COMPLEXITY_KEYWORDS)
+        or any(keyword in text for keyword in _GENERATION_KEYWORDS)
     )
 
     return SMART_MODEL if looks_complex else FAST_MODEL
@@ -3207,6 +3253,42 @@ def tool_create_document(
     return result_text, ui_event
 
 
+def build_generation_capability_message():
+    """Counters a real, observed failure mode: a model's base training
+    makes it reflexively refuse file-generation requests ("I can't
+    generate actual files...") even when the tool to do exactly that
+    is sitting right there in its tool list for this turn -- the
+    refusal text is a tell that it's reciting a generic disclaimer
+    instead of checking its actual available tools. Sent as its own
+    system message (not folded into EASTA_SYSTEM_PROMPT) so it's only
+    present -- and only true -- when ENABLE_GENERATION is actually on,
+    same pattern as build_canvas_context_message() below."""
+    if not ENABLE_GENERATION:
+        return None
+
+    return {
+        "role": "system",
+        "content": (
+            "You have real tools to generate downloadable PDF, DOCX, "
+            "and PPTX files, and to generate images -- when the user "
+            "asks you to create/generate/produce/make one of these, "
+            "or to turn/convert something into one, call the "
+            "appropriate tool immediately instead of describing how "
+            "they could make it themselves. This includes requests "
+            "that refer to content already in this conversation (e.g. "
+            "\"generate a PDF of that\" or \"turn this into a Word "
+            "doc\" means the content of your own previous reply, or "
+            "whatever the user just pointed at) -- use that content, "
+            "don't ask them to re-paste it. Never say you cannot "
+            "generate files or images, or suggest pasting Markdown "
+            "into an external tool like Word/Google Docs/Smallpdf "
+            "instead -- that is a generic disclaimer from your base "
+            "training and is false for EASTA specifically, which has "
+            "these tools available to you right now."
+        ),
+    }
+
+
 def build_canvas_context_message(conversation_id: int):
     """If the conversation has an active canvas artifact, tells the
     model so a follow-up like "make it shorter" updates the canvas (by
@@ -3569,6 +3651,10 @@ def build_llm_context(
     recent = recent[-(CONTEXT_RECENT_MESSAGES * 2):]
 
     context = [{"role": "system", "content": EASTA_SYSTEM_PROMPT}]
+
+    generation_message = build_generation_capability_message()
+    if generation_message:
+        context.append(generation_message)
 
     if summary:
         context.append({

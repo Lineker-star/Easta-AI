@@ -632,6 +632,65 @@ production traffic. Pick these up in Cursor:
     covered by Sevalla's default TLS, but confirm it.
   - No paid API calls in this phase (manifest/service-worker/template
     work only) — nothing new to log to `usage_logs`.
+- **Fixed: document/image generation tools never reached the model for
+  short requests** — a real, observed correctness bug, not a polish
+  item: asking "Generate the pdf containing this" got a generic "I
+  can't generate actual files" refusal (with the model dumping raw
+  Markdown and suggesting Smallpdf/Google Docs/Word) even though
+  `generate_document`/`create_document`/`generate_image` were sitting
+  right there in `ENABLE_GENERATION`'s tool list. Root cause, found by
+  following the request through `backend/app.py`: `pick_model()`'s
+  complexity heuristic didn't recognize "generate the pdf..." as
+  needing the smarter model (too short, no matching keyword), so it
+  routed to `EASTA_FAST_MODEL` — which is deliberately **not** in
+  `TOOL_CAPABLE_MODELS` (kept tool-less for cost/latency, see that
+  set's own comment) and therefore got no tools at all, not just no
+  document tool. The fast model's own base-training refusal is what
+  the user saw; `EASTA_SMART_MODEL` (which does have the tool) was
+  never even tried, since the fast model's reply counted as a
+  successful turn, not an error to fall back from.
+  - **Fix 1**: a new `_GENERATION_KEYWORDS` list in `pick_model()`
+    (separate from `_COMPLEXITY_KEYWORDS`, since this is a correctness
+    requirement, not a complexity judgment call) forces any message
+    containing a generation verb (generate/create/make/turn X into/
+    convert, plus French/Spanish/German/Chinese/Russian/Portuguese/
+    Japanese/Korean/Italian/Dutch equivalents) or a file-type noun
+    (pdf/docx/pptx/word doc/presentation/slides/image/picture/...) onto
+    `EASTA_SMART_MODEL`, regardless of message length. Also fixes the
+    identical bug for `generate_image` (e.g. "create an image of a
+    sunset" was silently broken the same way and wasn't even the
+    reported case — found while tracing the same code path).
+  - **Fix 2**: a new `build_generation_capability_message()` system
+    message (only added when `ENABLE_GENERATION` is on — never claims
+    a capability that isn't actually there) explicitly tells the model
+    it has real file/image generation tools, to use them immediately
+    on create/generate/turn-into requests, that a reference to
+    existing content ("generate a PDF of that") means content already
+    in the conversation rather than something to ask the user to
+    re-paste, and explicitly **not** to claim it can't generate files
+    — directly countering the generic refusal text observed, which was
+    a tell that the model was reciting trained-in disclaimer habits
+    instead of checking its actual tools for this turn.
+  - Conversation history (needed for "generate a PDF of **that**" to
+    resolve what "that" means) was already included via
+    `build_llm_context()`'s normal recent-message window — confirmed
+    working, no change needed there.
+  - **Verified**: `pick_model()` now routes all of "Generate the pdf
+    containing this" (the exact reported phrasing), "turn that into a
+    Word doc", "make that into slides", "create an image of a sunset",
+    and French/Spanish/Chinese/Russian equivalents onto
+    `EASTA_SMART_MODEL`, confirmed as a member of `TOOL_CAPABLE_MODELS`
+    so `stream_with_tools()` actually attaches `tools=tools_for_model()`
+    to the request; confirmed genuinely simple messages ("hi there",
+    "what time is it") still route to the fast model, so the
+    cost-optimization isn't lost. ⚠️ **Not tested against a real
+    model**: no OpenRouter key is available in this environment, so
+    this confirms the routing/tool-availability plumbing is now
+    correct, not that a live model reliably calls the tool when
+    offered it — reproduce the exact repro steps (ask for a PDF, then
+    a Word doc, then slides, each in a fresh conversation with a
+    moderately long formatted prior reply) against the deployed app
+    before closing this out.
 
 ## Run locally
 
