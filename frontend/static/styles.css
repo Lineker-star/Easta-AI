@@ -770,6 +770,90 @@ button {
     border-color: var(--color-accent-soft-strong);
 }
 
+.sidebar-search {
+    padding: 2px 6px 10px;
+}
+
+.sidebar-search-input {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border-strong);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: 13px;
+}
+
+.sidebar-search-input::placeholder {
+    color: var(--color-text-faint);
+}
+
+.sidebar-search-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+/* Native ::-webkit-search-cancel-button is styled inconsistently
+   across browsers against a custom-styled input like this one --
+   hidden in favor of just clearing the field manually or with Escape,
+   same reasoning as not relying on other native form-control chrome
+   elsewhere in this file. */
+.sidebar-search-input::-webkit-search-cancel-button {
+    display: none;
+}
+
+.search-result-item {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    margin-bottom: 3px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    text-align: left;
+    cursor: pointer;
+    font-family: var(--font-body);
+}
+
+.search-result-item:hover {
+    background: var(--color-bg);
+}
+
+.search-result-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.search-result-snippet {
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.search-result-snippet mark {
+    background: var(--color-accent-soft);
+    color: var(--color-accent-hover);
+    border-radius: 3px;
+    padding: 0 1px;
+}
+
+.search-empty {
+    padding: 12px;
+    font-size: 13px;
+    color: var(--color-text-faint);
+    text-align: center;
+}
+
 /* min-height: 0 overrides flex items' default min-height: auto --
    without it, on a short viewport with many conversations this list
    would refuse to shrink below its content's height and push
@@ -789,8 +873,10 @@ button {
 
 /* The row (not the link) owns the pill background/hover/active state,
    so highlighting spans the full row width -- including the
-   hover-revealed rename/delete buttons -- not just where the text is. */
+   hover-revealed menu button -- not just where the text is.
+   position: relative anchors .conversation-menu's dropdown. */
 .conversation-row {
+    position: relative;
     display: flex;
     align-items: center;
     border-radius: var(--radius-sm);
@@ -873,6 +959,138 @@ button {
 
 .conversation-action-button.danger:hover {
     color: var(--color-danger);
+}
+
+/* A single "..." trigger per row instead of one icon per action --
+   Rename/Delete alone were fine as two small icons, but Phase 19 adds
+   Pin and Move to folder on top, and four crammed hover-reveal icons
+   in a ~280px sidebar row stops being "small". */
+.conversation-menu-button {
+    font-size: 14px;
+}
+
+.conversation-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 2px);
+    right: 4px;
+    z-index: 5;
+    flex-direction: column;
+    min-width: 170px;
+    padding: 4px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-strong);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-md);
+}
+
+.conversation-menu.open {
+    display: flex;
+    animation: popover-in 0.15s ease;
+}
+
+/* Global (not nested in a media query) since both this menu and the
+   composer's mobile "more options" popover (<=560px only) use it. */
+@keyframes popover-in {
+    from {
+        opacity: 0;
+        transform: translateY(4px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.conversation-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.conversation-menu-item:hover {
+    background: var(--color-bg-soft);
+}
+
+.conversation-menu-item.danger {
+    color: var(--color-danger);
+}
+
+.conversation-pin-icon {
+    flex-shrink: 0;
+    font-size: 11px;
+    margin-right: 2px;
+}
+
+.sidebar-section-heading {
+    padding: 12px 12px 4px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-faint);
+}
+
+.sidebar-section-heading:first-child {
+    padding-top: 2px;
+}
+
+/* Folders use <details>/<summary> for free (keyboard-accessible)
+   collapse/expand, with a custom disclosure triangle replacing the
+   native marker (hidden below) rather than styling that directly --
+   its appearance isn't consistently themeable across browsers. */
+.sidebar-folder {
+    margin-bottom: 2px;
+}
+
+.sidebar-folder-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px 8px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    list-style: none;
+}
+
+.sidebar-folder-summary::-webkit-details-marker {
+    display: none;
+}
+
+.sidebar-folder-summary:hover {
+    background: var(--color-bg);
+    color: var(--color-text);
+}
+
+.sidebar-folder-summary::before {
+    content: "\25b8";
+    font-size: 10px;
+    flex-shrink: 0;
+    display: inline-block;
+    transition: transform 0.15s ease;
+}
+
+.sidebar-folder[open] > .sidebar-folder-summary::before {
+    transform: rotate(90deg);
+}
+
+.sidebar-folder-count {
+    color: var(--color-text-faint);
+    font-weight: 400;
 }
 
 .conversation-rename-input {
@@ -2031,6 +2249,64 @@ button {
 }
 
 /* =========================================================================
+   SHARED CONVERSATION (public, read-only)
+   ========================================================================= */
+
+.shared-page {
+    max-width: 800px;
+    margin: 0 auto;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--color-bg);
+}
+
+.shared-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 20px 20px 16px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.shared-badge {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-faint);
+    padding: 6px 12px;
+    border-radius: var(--radius-pill);
+    background: var(--color-bg-soft);
+    white-space: nowrap;
+}
+
+.shared-title-bar {
+    padding: 20px 20px 0;
+}
+
+.shared-title-bar h1 {
+    font-size: 20px;
+}
+
+.shared-page .chat-messages {
+    flex: 1;
+    padding: 20px 20px 40px;
+}
+
+.shared-loading,
+.shared-error {
+    text-align: center;
+    color: var(--color-text-muted);
+    margin-top: 15vh;
+    font-size: 15px;
+}
+
+.shared-error {
+    color: var(--color-danger);
+}
+
+/* =========================================================================
    USAGE / COST DASHBOARD
    ========================================================================= */
 
@@ -2468,21 +2744,14 @@ button {
     /* Kept as display:none/flex (not opacity + pointer-events) so
        controls inside stay out of tab order while closed -- the
        animation still plays on open because a CSS `animation` (unlike
-       a `transition`) restarts when display flips from none to flex. */
+       a `transition`) restarts when display flips from none to flex.
+       popover-in's @keyframes lives at the top level of this file
+       (search for it), not nested in this media query, since
+       .conversation-menu also uses it and needs it available at every
+       width, not just <=560px. */
     .composer-extra-controls.open {
         display: flex;
         animation: popover-in 0.15s ease;
-    }
-
-    @keyframes popover-in {
-        from {
-            opacity: 0;
-            transform: translateY(4px) scale(0.98);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-        }
     }
 }
 
@@ -2501,6 +2770,7 @@ button {
     .sidebar-toggle,
     .sidebar-close,
     .canvas-close-button,
+    .conversation-action-button,
     #send-button {
         min-width: 44px;
         min-height: 44px;
@@ -2510,12 +2780,12 @@ button {
     .composer-toggle-button,
     .composer-select,
     .canvas-action-button,
-    .copy-code-button {
+    .copy-code-button,
+    .conversation-menu-item {
         min-height: 44px;
     }
 
-    .attachment-chip button,
-    .conversation-action-button {
+    .attachment-chip button {
         min-width: 32px;
         min-height: 32px;
     }

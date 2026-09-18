@@ -2,6 +2,7 @@ const META_DELIM = "\u241F";
 
 const newChatForm = document.getElementById("new-chat-form");
 const conversationList = document.getElementById("conversation-list");
+const conversationSearchInput = document.getElementById("conversation-search-input");
 const messageForm = document.getElementById("message-form");
 const input = document.getElementById("message");
 const sendButton = document.getElementById("send-button");
@@ -906,9 +907,169 @@ function renderMessages(messages) {
 function renderConversations(conversations) {
     conversationList.innerHTML = "";
 
-    for (const conversation of conversations) {
+    const pinned = conversations.filter((conversation) => conversation.pinned);
+    const unpinned = conversations.filter((conversation) => !conversation.pinned);
+
+    const folderOrder = [];
+    const byFolder = {};
+    const unfiled = [];
+
+    for (const conversation of unpinned) {
+        if (conversation.folder) {
+            if (!byFolder[conversation.folder]) {
+                byFolder[conversation.folder] = [];
+                folderOrder.push(conversation.folder);
+            }
+            byFolder[conversation.folder].push(conversation);
+        } else {
+            unfiled.push(conversation);
+        }
+    }
+
+    if (pinned.length > 0) {
+        const heading = document.createElement("div");
+        heading.className = "sidebar-section-heading";
+        heading.textContent = t("sidebar_pinned_heading");
+        conversationList.appendChild(heading);
+
+        for (const conversation of pinned) {
+            conversationList.appendChild(buildConversationRow(conversation));
+        }
+    }
+
+    for (const folderName of folderOrder) {
+        conversationList.appendChild(
+            buildFolderSection(folderName, byFolder[folderName])
+        );
+    }
+
+    for (const conversation of unfiled) {
         conversationList.appendChild(buildConversationRow(conversation));
     }
+}
+
+
+function buildFolderSection(folderName, conversations) {
+    const details = document.createElement("details");
+    details.className = "sidebar-folder";
+    details.open = true;
+
+    const summary = document.createElement("summary");
+    summary.className = "sidebar-folder-summary";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = folderName;
+
+    const countSpan = document.createElement("span");
+    countSpan.className = "sidebar-folder-count";
+    countSpan.textContent = `(${conversations.length})`;
+
+    summary.appendChild(nameSpan);
+    summary.appendChild(countSpan);
+    details.appendChild(summary);
+
+    for (const conversation of conversations) {
+        details.appendChild(buildConversationRow(conversation));
+    }
+
+    return details;
+}
+
+
+function closeAllConversationMenus() {
+    conversationList.querySelectorAll(".conversation-menu.open").forEach((menu) => {
+        menu.classList.remove("open");
+    });
+    conversationList
+        .querySelectorAll('.conversation-menu-button[aria-expanded="true"]')
+        .forEach((button) => button.setAttribute("aria-expanded", "false"));
+}
+
+document.addEventListener("click", (event) => {
+    if (!event.target.closest(".conversation-row")) {
+        closeAllConversationMenus();
+    }
+});
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        closeAllConversationMenus();
+    }
+});
+
+
+async function togglePinConversation(conversation) {
+    try {
+        const response = await apiRequest(
+            `/api/conversations/${conversation.id}`,
+            {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pinned: !conversation.pinned })
+            }
+        );
+        await readJsonResponse(response);
+    } catch (error) {
+        console.error(error);
+    }
+
+    const conversations = await loadConversations();
+    renderConversations(conversations);
+}
+
+
+async function shareOrCopyConversation(conversation, menuItemButton) {
+    let token = conversation.share_token;
+
+    if (!token) {
+        try {
+            const response = await apiRequest(
+                `/api/conversations/${conversation.id}/share`,
+                { method: "POST" }
+            );
+            const data = await readJsonResponse(response);
+            token = data.share_token;
+            conversation.share_token = token;
+        } catch (error) {
+            console.error(error);
+            closeAllConversationMenus();
+            return;
+        }
+    }
+
+    const url = `${window.location.origin}/shared/${token}`;
+
+    try {
+        await navigator.clipboard.writeText(url);
+    } catch {
+        // Ignore -- the Clipboard API can be unavailable (insecure
+        // context, denied permission); the menu item's label below
+        // still confirms the link now exists even if copying it
+        // silently failed, and it's right there to select manually.
+    }
+
+    menuItemButton.textContent = t("conversation_link_copied_label");
+
+    setTimeout(async () => {
+        const conversations = await loadConversations();
+        renderConversations(conversations);
+    }, 1000);
+}
+
+
+async function unshareConversation(conversationId) {
+    try {
+        const response = await apiRequest(
+            `/api/conversations/${conversationId}/unshare`,
+            { method: "POST" }
+        );
+        await readJsonResponse(response);
+    } catch (error) {
+        console.error(error);
+    }
+
+    const conversations = await loadConversations();
+    renderConversations(conversations);
 }
 
 
@@ -934,38 +1095,104 @@ function buildConversationRow(conversation) {
         }
     });
 
-    const actions = document.createElement("div");
-    actions.className = "conversation-row-actions";
+    // A single "..." menu (Pin/Rename/Move to folder/Delete) instead
+    // of one icon per action -- see the CSS comment above
+    // .conversation-menu-button for why.
+    const menuButton = document.createElement("button");
+    menuButton.type = "button";
+    menuButton.className = "conversation-action-button conversation-menu-button";
+    menuButton.textContent = "⋯";
+    menuButton.title = t("conversation_menu_title");
+    menuButton.setAttribute("aria-label", t("conversation_menu_title"));
+    menuButton.setAttribute("aria-expanded", "false");
 
-    const renameButton = document.createElement("button");
-    renameButton.type = "button";
-    renameButton.className = "conversation-action-button";
-    renameButton.textContent = "✏️";
-    renameButton.title = t("conversation_rename_title");
-    renameButton.setAttribute("aria-label", t("conversation_rename_title"));
-    renameButton.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
+    const menu = document.createElement("div");
+    menu.className = "conversation-menu";
+
+    const pinItem = document.createElement("button");
+    pinItem.type = "button";
+    pinItem.className = "conversation-menu-item";
+    pinItem.textContent = conversation.pinned
+        ? t("conversation_unpin_label")
+        : t("conversation_pin_label");
+    pinItem.addEventListener("click", () => {
+        closeAllConversationMenus();
+        togglePinConversation(conversation);
+    });
+
+    const renameItem = document.createElement("button");
+    renameItem.type = "button";
+    renameItem.className = "conversation-menu-item";
+    renameItem.textContent = t("conversation_rename_title");
+    renameItem.addEventListener("click", () => {
+        closeAllConversationMenus();
         showConversationRenameInput(row, conversation);
     });
 
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "conversation-action-button danger";
-    deleteButton.textContent = "🗑️";
-    deleteButton.title = t("conversation_delete_title");
-    deleteButton.setAttribute("aria-label", t("conversation_delete_title"));
-    deleteButton.addEventListener("click", (event) => {
-        event.preventDefault();
+    const folderItem = document.createElement("button");
+    folderItem.type = "button";
+    folderItem.className = "conversation-menu-item";
+    folderItem.textContent = t("conversation_folder_label");
+    folderItem.addEventListener("click", () => {
+        closeAllConversationMenus();
+        showConversationFolderInput(row, conversation);
+    });
+
+    const shareItem = document.createElement("button");
+    shareItem.type = "button";
+    shareItem.className = "conversation-menu-item";
+    shareItem.textContent = conversation.share_token
+        ? t("conversation_copy_link_label")
+        : t("conversation_share_label");
+    shareItem.addEventListener("click", (event) => {
         event.stopPropagation();
+        shareOrCopyConversation(conversation, shareItem);
+    });
+
+    menu.appendChild(pinItem);
+    menu.appendChild(renameItem);
+    menu.appendChild(folderItem);
+    menu.appendChild(shareItem);
+
+    if (conversation.share_token) {
+        const unshareItem = document.createElement("button");
+        unshareItem.type = "button";
+        unshareItem.className = "conversation-menu-item";
+        unshareItem.textContent = t("conversation_unshare_label");
+        unshareItem.addEventListener("click", () => {
+            closeAllConversationMenus();
+            unshareConversation(conversation.id);
+        });
+        menu.appendChild(unshareItem);
+    }
+
+    const deleteItem = document.createElement("button");
+    deleteItem.type = "button";
+    deleteItem.className = "conversation-menu-item danger";
+    deleteItem.textContent = t("conversation_delete_title");
+    deleteItem.addEventListener("click", () => {
+        closeAllConversationMenus();
         showConversationDeleteConfirm(row, conversation);
     });
 
-    actions.appendChild(renameButton);
-    actions.appendChild(deleteButton);
+    menu.appendChild(deleteItem);
+
+    menuButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const isOpen = menu.classList.contains("open");
+        closeAllConversationMenus();
+
+        if (!isOpen) {
+            menu.classList.add("open");
+            menuButton.setAttribute("aria-expanded", "true");
+        }
+    });
 
     row.appendChild(link);
-    row.appendChild(actions);
+    row.appendChild(menuButton);
+    row.appendChild(menu);
 
     return row;
 }
@@ -1007,6 +1234,65 @@ function showConversationRenameInput(row, conversation) {
                 // whatever title the server actually has, which is
                 // self-explanatory feedback that the rename didn't
                 // stick.
+                console.error(error);
+            }
+        }
+
+        const conversations = await loadConversations();
+        renderConversations(conversations);
+    };
+
+    input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            finish(true);
+        } else if (event.key === "Escape") {
+            event.preventDefault();
+            finish(false);
+        }
+    });
+
+    input.addEventListener("blur", () => finish(true));
+
+    row.appendChild(input);
+    input.focus();
+    input.select();
+}
+
+
+function showConversationFolderInput(row, conversation) {
+    row.innerHTML = "";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "conversation-rename-input";
+    input.placeholder = t("conversation_folder_placeholder");
+    input.value = conversation.folder || "";
+    input.maxLength = 50;
+
+    let settled = false;
+
+    const finish = async (shouldSave) => {
+        if (settled) {
+            return;
+        }
+        settled = true;
+
+        const newFolder = input.value.trim();
+        const currentFolder = conversation.folder || "";
+
+        if (shouldSave && newFolder !== currentFolder) {
+            try {
+                const response = await apiRequest(
+                    `/api/conversations/${conversation.id}`,
+                    {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ folder: newFolder })
+                    }
+                );
+                await readJsonResponse(response);
+            } catch (error) {
                 console.error(error);
             }
         }
@@ -1100,6 +1386,100 @@ async function deleteConversationAndRefresh(conversationId) {
         await openConversation(conversation.id, true);
     }
 }
+
+
+/* --- sidebar conversation search ---------------------------------------
+   Swaps #conversation-list between the normal chronological view
+   (renderConversations) and search results (renderSearchResults) based
+   on whether the search box has text -- debounced so it doesn't fire a
+   request on every keystroke. */
+
+async function searchConversations(query) {
+    const response = await apiRequest(
+        `/api/conversations/search?q=${encodeURIComponent(query)}`
+    );
+    const data = await readJsonResponse(response);
+    return data.results;
+}
+
+
+function renderSearchResults(results) {
+    conversationList.innerHTML = "";
+
+    if (results.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "search-empty";
+        empty.textContent = t("conversation_search_no_results");
+        conversationList.appendChild(empty);
+        return;
+    }
+
+    for (const result of results) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "search-result-item";
+
+        const title = document.createElement("div");
+        title.className = "search-result-title";
+        title.textContent = result.title;
+        item.appendChild(title);
+
+        if (result.snippet) {
+            const snippet = document.createElement("div");
+            snippet.className = "search-result-snippet";
+            // result.snippet is pre-escaped by search_conversations() in
+            // backend/app.py (html.escape() over the whole snippet, only
+            // the deliberately-inserted <mark> tags are real markup) --
+            // safe to insert directly.
+            snippet.innerHTML = result.snippet;
+            item.appendChild(snippet);
+        }
+
+        item.addEventListener("click", async () => {
+            conversationSearchInput.value = "";
+            await openConversation(result.id, true);
+
+            if (window.innerWidth <= 700) {
+                sidebar.classList.add("sidebar-hidden");
+            }
+        });
+
+        conversationList.appendChild(item);
+    }
+}
+
+
+let searchDebounceTimer = null;
+
+conversationSearchInput.addEventListener("input", () => {
+    const query = conversationSearchInput.value.trim();
+
+    if (searchDebounceTimer) {
+        clearTimeout(searchDebounceTimer);
+    }
+
+    if (!query) {
+        loadConversations().then(renderConversations);
+        return;
+    }
+
+    searchDebounceTimer = setTimeout(async () => {
+        try {
+            const results = await searchConversations(query);
+            renderSearchResults(results);
+        } catch (error) {
+            console.error(error);
+        }
+    }, 300);
+});
+
+conversationSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        conversationSearchInput.value = "";
+        loadConversations().then(renderConversations);
+        conversationSearchInput.blur();
+    }
+});
 
 
 function resizeMessageInput() {

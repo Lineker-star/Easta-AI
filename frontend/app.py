@@ -81,6 +81,20 @@ def transcriptions(job_id=None):
     )
 
 
+@app.get("/shared/<share_token>")
+def shared_conversation(share_token):
+    # Deliberately unauthenticated -- see GET /api/shared/{token} in
+    # backend/app.py, which this page fetches from client-side
+    # (shared.js). No sidebar/composer template include here: this is
+    # the public read-only view a stranger reaches from a copied link,
+    # not the logged-in chat UI.
+    return render_template(
+        "shared.html",
+        backend_url=BACKEND_URL,
+        share_token=share_token,
+    )
+
+
 @app.get("/offline")
 def offline():
     # Cached by the service worker as the navigation fallback when the

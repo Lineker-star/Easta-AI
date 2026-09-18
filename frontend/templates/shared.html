@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Shared conversation — EASTA</title>
+
+    {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+
+    <!-- Same markdown + syntax-highlighting + sanitization stack as
+         chat.html, for rendering assistant replies read-only here. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link
+        rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css"
+    >
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
+</head>
+
+<body class="chat-page">
+
+    <div class="shared-page">
+
+        <header class="shared-header">
+            <div class="brand-row">
+                <img
+                    class="brand-mark"
+                    src="{{ url_for('static', filename='icons/icon-square.png') }}"
+                    alt="EASTA"
+                >
+                <span class="brand-name">EASTA</span>
+            </div>
+
+            <span class="shared-badge">Shared conversation · read-only</span>
+        </header>
+
+        <div class="shared-title-bar">
+            <h1 id="shared-title">Loading…</h1>
+        </div>
+
+        <main class="chat-messages" id="shared-messages">
+            <p class="shared-loading">Loading…</p>
+        </main>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+        window.SHARE_TOKEN = {{ share_token | tojson }};
+    </script>
+
+    <script src="{{ url_for('static', filename='shared.js') }}"></script>
+
+</body>
+</html>

@@ -175,6 +175,13 @@ ENABLE_SUMMARIZATION = (
 CONTEXT_RECENT_MESSAGES = int(
     os.getenv("EASTA_CONTEXT_RECENT_MESSAGES", "12")
 )
+# Cross-conversation memory (Phase 21): short, durable facts about a
+# user extracted from what they explicitly say, injected into every
+# future conversation's context -- see maybe_extract_memory() /
+# build_memory_context_message() below.
+ENABLE_MEMORY = (
+    os.getenv("EASTA_ENABLE_MEMORY", "true").lower() == "true"
+)
 ENABLE_RESEARCH_MODE = (
     os.getenv("EASTA_ENABLE_RESEARCH_MODE", "true").lower() == "true"
 )
@@ -299,8 +306,15 @@ class ApiKeyCreateRequest(BaseModel):
     name: str
 
 
-class RenameConversationRequest(BaseModel):
-    title: str
+class ConversationUpdateRequest(BaseModel):
+    """All fields optional -- PATCH /api/conversations/{id} only
+    touches whichever ones the client actually sent (see
+    update_conversation_fields() and its exclude_unset=True caller),
+    so a rename request doesn't accidentally clear pinned/folder and
+    vice versa."""
+    title: str | None = None
+    pinned: bool | None = None
+    folder: str | None = None
 
 
 class PublicChatRequest(BaseModel):
@@ -768,6 +782,80 @@ def resolve_api_key(api_key: str) -> int | None:
     return user_id
 
 
+# --- Cross-conversation memory (Phase 21) -----------------------------------
+# Backs the /account "Remembered" list (view/delete individual/clear all)
+# and build_memory_context_message() above -- see database/schema.sql's
+# user_memory table for the extraction/retention reasoning.
+
+def save_user_memory(
+    user_id: int, content: str, source_conversation_id: int | None
+):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO user_memory (
+                    user_id, content, source_conversation_id
+                )
+                VALUES (%s, %s, %s)
+                RETURNING id;
+                """,
+                (user_id, content, source_conversation_id),
+            )
+
+            return cursor.fetchone()[0]
+
+
+def get_user_memory(user_id: int, limit: int | None = None):
+    """Returns (id, content, source_conversation_id, created_at) rows,
+    most recent first."""
+    query = """
+        SELECT id, content, source_conversation_id, created_at
+        FROM user_memory
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+    """
+    params = [user_id]
+
+    if limit:
+        query += " LIMIT %s"
+        params.append(limit)
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query + ";", params)
+
+            return cursor.fetchall()
+
+
+def delete_user_memory_item(memory_id: int, user_id: int) -> bool:
+    """Ownership check is inline in the WHERE clause (unlike the
+    conversations get-then-mutate pattern) since there's no separate
+    read step needed before deleting one memory item. Returns whether
+    a row was actually deleted."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM user_memory
+                WHERE id = %s AND user_id = %s
+                RETURNING id;
+                """,
+                (memory_id, user_id),
+            )
+
+            return cursor.fetchone() is not None
+
+
+def clear_user_memory(user_id: int):
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM user_memory WHERE user_id = %s;",
+                (user_id,),
+            )
+
+
 # --- Conversation / message helpers -----------------------------------------
 
 def create_conversation(user_id: int):
@@ -801,7 +889,11 @@ def get_conversation(
                     title,
                     created_at,
                     summary,
-                    summarized_through_message_id
+                    summarized_through_message_id,
+                    pinned,
+                    folder,
+                    share_token,
+                    shared_at
                 FROM conversations
                 WHERE
                     id = %s
@@ -816,7 +908,67 @@ def get_conversation(
             return cursor.fetchone()
 
 
+def set_conversation_share_token(conversation_id: int, token: str):
+    """Caller is responsible for the ownership check
+    (get_conversation(conversation_id, user_id)) before calling this.
+    Setting a token when one already exists (re-sharing) overwrites
+    it, which is exactly what "regenerating invalidates old links"
+    means -- the old token string just stops matching any row."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE conversations
+                SET share_token = %s, shared_at = CURRENT_TIMESTAMP
+                WHERE id = %s;
+                """,
+                (token, conversation_id),
+            )
+
+
+def clear_conversation_share_token(conversation_id: int):
+    """Caller is responsible for the ownership check first. Clearing
+    both columns (not just share_token) so a later re-share shows a
+    fresh "not shared before" state rather than a stale shared_at."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE conversations
+                SET share_token = NULL, shared_at = NULL
+                WHERE id = %s;
+                """,
+                (conversation_id,),
+            )
+
+
+def get_conversation_by_share_token(token: str):
+    """Backs the unauthenticated GET /api/shared/{token} -- the whole
+    point of this query is that it can ONLY ever return what a
+    stranger with just the link is allowed to see, so it deliberately
+    selects title only, never user_id/email/username or anything else
+    about the account that shared it."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, title
+                FROM conversations
+                WHERE share_token = %s;
+                """,
+                (token,),
+            )
+
+            return cursor.fetchone()
+
+
 def get_conversations(user_id: int):
+    """Returns (id, title, created_at, chat_number, pinned, folder,
+    share_token). chat_number is a stable chronological identity
+    (oldest = 1, used for the "Chat N - date" auto-label) computed
+    independently of display order, so pinning/unpinning a
+    conversation never changes its number -- only the final ORDER BY
+    (pinned first) changes where it renders in the sidebar."""
     with psycopg.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -825,19 +977,25 @@ def get_conversations(user_id: int):
                     id,
                     title,
                     created_at,
-                    chat_number
+                    chat_number,
+                    pinned,
+                    folder,
+                    share_token
                 FROM (
                     SELECT
                         id,
                         title,
                         created_at,
+                        pinned,
+                        folder,
+                        share_token,
                         ROW_NUMBER() OVER (
                             ORDER BY created_at, id
                         ) AS chat_number
                     FROM conversations
                     WHERE user_id = %s
                 ) AS numbered_conversations
-                ORDER BY created_at DESC, id DESC;
+                ORDER BY pinned DESC, created_at DESC, id DESC;
                 """,
                 (user_id,),
             )
@@ -867,22 +1025,35 @@ def rename_conversation_if_default(
             )
 
 
-def update_conversation_title(conversation_id: int, title: str):
-    """Explicit user-driven rename (unlike
-    rename_conversation_if_default() above, this always overwrites the
-    title, not just the still-default one). Caller is responsible for
-    the ownership check (get_conversation(conversation_id, user_id))
-    before calling this, same pattern as every other write helper in
-    this section."""
+_CONVERSATION_UPDATABLE_COLUMNS = {"title", "pinned", "folder"}
+
+
+def update_conversation_fields(conversation_id: int, fields: dict):
+    """Partial update for conversations.title/pinned/folder -- used by
+    PATCH /api/conversations/{id} for rename (explicit user-driven,
+    unlike rename_conversation_if_default() above which only touches
+    the still-default title) and for pin/folder assignment alike, so a
+    request only needs to send the field(s) it's actually changing.
+    Caller is responsible for the ownership check
+    (get_conversation(conversation_id, user_id)) before calling this,
+    same pattern as every other write helper in this section.
+
+    `fields` keys are filtered against the fixed whitelist above before
+    ever reaching the query -- they're not trusted as literal SQL
+    identifiers just because they originated from a Pydantic model."""
+    columns = [key for key in fields if key in _CONVERSATION_UPDATABLE_COLUMNS]
+
+    if not columns:
+        return
+
+    set_clause = ", ".join(f"{column} = %s" for column in columns)
+    values = [fields[column] for column in columns] + [conversation_id]
+
     with psycopg.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                """
-                UPDATE conversations
-                SET title = %s
-                WHERE id = %s;
-                """,
-                (title, conversation_id),
+                f"UPDATE conversations SET {set_clause} WHERE id = %s;",
+                values,
             )
 
 
@@ -903,6 +1074,116 @@ def delete_conversation(conversation_id: int):
                 """,
                 (conversation_id,),
             )
+
+
+# Delimiters ts_headline() wraps each match in -- deliberately control
+# characters that would never appear in real message/title text, so
+# search_conversations() below can safely html.escape() the WHOLE
+# snippet first (protecting against a user's own message content
+# containing literal '<'/'>'/'&') and only THEN swap these markers for
+# real <mark> tags, rather than trusting ts_headline's raw output
+# (which defaults to <b>/</b> with no escaping of the surrounding
+# text) directly into the page.
+_SEARCH_HIGHLIGHT_START = "\x01"
+_SEARCH_HIGHLIGHT_STOP = "\x02"
+_TS_HEADLINE_OPTIONS = (
+    f"StartSel={_SEARCH_HIGHLIGHT_START}, StopSel={_SEARCH_HIGHLIGHT_STOP}, "
+    "MaxFragments=1, MaxWords=20, MinWords=5, HighlightAll=false"
+)
+
+
+def search_conversations(query: str, user_id: int, limit: int = 20):
+    """Full-text search across a user's own conversation titles and
+    message content (Postgres to_tsvector/websearch_to_tsquery, same
+    technique as documents/RAG's retrieve_relevant_chunks() -- not a
+    LIKE scan, so this stays fast as history grows). One result per
+    conversation (its single best-ranked match, title or message),
+    ordered by relevance. Returns (id, title, created_at, snippet,
+    match_type) rows -- snippet is pre-escaped HTML with the match
+    wrapped in <mark>, safe to insert directly."""
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    f"""
+                    WITH query AS (
+                        SELECT websearch_to_tsquery('english', %s) AS tsq
+                    ),
+                    title_matches AS (
+                        SELECT
+                            c.id,
+                            c.title,
+                            c.created_at,
+                            ts_headline(
+                                'english', c.title, query.tsq,
+                                '{_TS_HEADLINE_OPTIONS}'
+                            ) AS snippet,
+                            'title' AS match_type,
+                            ts_rank_cd(
+                                to_tsvector('english', c.title), query.tsq
+                            ) AS rank
+                        FROM conversations c, query
+                        WHERE
+                            c.user_id = %s
+                            AND to_tsvector('english', c.title) @@ query.tsq
+                    ),
+                    message_matches AS (
+                        SELECT
+                            c.id,
+                            c.title,
+                            c.created_at,
+                            ts_headline(
+                                'english', m.content, query.tsq,
+                                '{_TS_HEADLINE_OPTIONS}'
+                            ) AS snippet,
+                            'message' AS match_type,
+                            ts_rank_cd(m.search_vector, query.tsq) AS rank
+                        FROM messages m
+                        JOIN conversations c ON c.id = m.conversation_id
+                        CROSS JOIN query
+                        WHERE
+                            c.user_id = %s
+                            AND m.search_vector @@ query.tsq
+                    ),
+                    combined AS (
+                        SELECT * FROM title_matches
+                        UNION ALL
+                        SELECT * FROM message_matches
+                    ),
+                    deduped AS (
+                        SELECT DISTINCT ON (id) *
+                        FROM combined
+                        ORDER BY id, rank DESC
+                    )
+                    SELECT id, title, created_at, snippet, match_type
+                    FROM deduped
+                    ORDER BY rank DESC
+                    LIMIT %s;
+                    """,
+                    (query, user_id, user_id, limit),
+                )
+
+                rows = cursor.fetchall()
+
+            except psycopg.Error:
+                # websearch_to_tsquery can reject odd input (e.g. bare
+                # punctuation); degrade to "no results" instead of a
+                # 500 for a query the user just typed oddly.
+                connection.rollback()
+                return []
+
+    results = []
+    for conversation_id, title, created_at, raw_snippet, match_type in rows:
+        safe_snippet = (
+            html.escape(raw_snippet)
+            .replace(_SEARCH_HIGHLIGHT_START, "<mark>")
+            .replace(_SEARCH_HIGHLIGHT_STOP, "</mark>")
+        )
+        results.append(
+            (conversation_id, title, created_at, safe_snippet, match_type)
+        )
+
+    return results
 
 
 def update_conversation_summary(
@@ -942,9 +1223,10 @@ def save_message(
                     conversation_id,
                     role,
                     content,
-                    attachments
+                    attachments,
+                    search_vector
                 )
-                VALUES (%s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, to_tsvector('english', %s))
                 RETURNING id;
                 """,
                 (
@@ -952,6 +1234,7 @@ def save_message(
                     role,
                     content,
                     Json(attachments) if attachments else None,
+                    content,
                 ),
             )
 
@@ -3556,7 +3839,7 @@ def maybe_summarize_conversation(conversation_id: int, conversation_row):
     if not ENABLE_SUMMARIZATION:
         return
 
-    _id, _title, _created_at, existing_summary, summarized_through = (
+    _id, _title, _created_at, existing_summary, summarized_through, *_rest = (
         conversation_row
     )
 
@@ -3624,6 +3907,120 @@ def maybe_summarize_conversation(conversation_id: int, conversation_row):
         print(f"EASTA: conversation summarization failed: {error!r}")
 
 
+# --- Cross-conversation memory -----------------------------------------
+# Short, durable facts about a user (stated preferences, standing
+# context) extracted from what they explicitly say, distinct from any
+# single conversation's own history -- see database/schema.sql's
+# user_memory table. Much more conservative than summarization above:
+# summarization runs unconditionally once a conversation is long enough
+# and folds in anything relevant; this only fires on messages that look
+# like they might state a personal fact at all (a cheap keyword
+# pre-filter, to avoid an extra LLM call on every single turn), and even
+# then the extraction prompt is written to say NONE far more often than
+# not -- inferred/guessed facts are explicitly disallowed, not just
+# discouraged.
+
+_MEMORY_TRIGGER_KEYWORDS = (
+    "i am", "i'm", "my name", "call me", "i like", "i love", "i prefer",
+    "i hate", "i dislike", "i work", "i live", "i study", "my job",
+    "remember that", "remember this", "for future reference",
+    "i'm allergic", "i am allergic", "i don't eat", "i speak",
+    "my favorite", "my favourite", "i use", "i own", "i have a",
+)
+
+
+def _message_might_contain_durable_fact(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _MEMORY_TRIGGER_KEYWORDS)
+
+
+MEMORY_EXTRACTION_SYSTEM_PROMPT = (
+    "You extract durable facts worth remembering about a user across "
+    "future conversations, from a single message they just sent. Only "
+    "extract something EXPLICITLY stated by the user themselves -- "
+    "never infer, guess, or assume anything. Good examples: their "
+    "name, a dietary restriction or allergy, their profession, "
+    "timezone, language preference, a stated preference for how they "
+    "want you to respond. Bad examples: anything about what they're "
+    "currently asking for or working on right now, anything you'd "
+    "have to guess or infer rather than read directly, anything "
+    "already generic/obvious. If there is nothing worth remembering -- "
+    "which is the common case -- respond with exactly the word NONE "
+    "and nothing else. Otherwise respond with ONE short third-person "
+    "sentence stating the fact, and nothing else: no preamble, no "
+    "quotes, no explanation."
+)
+
+
+def extract_durable_fact(user_text: str) -> str | None:
+    """Best-effort, conservative extraction -- returns a short fact
+    string, or None if there's nothing worth remembering (expected to
+    be the common case even when this runs) or the call fails for any
+    reason. Uses FAST_MODEL since this is a simple classification
+    task, not one that benefits from the smarter/pricier model."""
+    try:
+        response = client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {"role": "system", "content": MEMORY_EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_text[:2000]},
+            ],
+            max_tokens=80,
+            temperature=0,
+        )
+        text = (response.choices[0].message.content or "").strip()
+
+    except Exception as error:  # noqa: BLE001 - best-effort
+        print(f"EASTA: memory extraction call failed: {error!r}")
+        return None
+
+    if not text or text.upper() == "NONE":
+        return None
+
+    return text[:500]
+
+
+def maybe_extract_memory(conversation_id: int, user_id: int, user_text: str):
+    if not ENABLE_MEMORY or not user_text:
+        return
+
+    if not _message_might_contain_durable_fact(user_text):
+        return
+
+    fact = extract_durable_fact(user_text)
+
+    if fact:
+        save_user_memory(user_id, fact, conversation_id)
+
+
+MAX_MEMORY_ITEMS_IN_CONTEXT = 20
+
+
+def build_memory_context_message(user_id: int):
+    if not ENABLE_MEMORY:
+        return None
+
+    items = get_user_memory(user_id, limit=MAX_MEMORY_ITEMS_IN_CONTEXT)
+
+    if not items:
+        return None
+
+    bullet_lines = "\n".join(
+        f"- {content}" for _id, content, _source, _created in items
+    )
+
+    return {
+        "role": "system",
+        "content": (
+            "Remembered context about this user from past "
+            "conversations (explicitly stated by them previously, not "
+            "verified fact -- treat as likely-true background, and "
+            "defer to anything they say in THIS conversation if it "
+            "conflicts):\n" + bullet_lines
+        ),
+    }
+
+
 def build_language_override_message(language_code: str | None):
     """Pins a reply-language override into the system context for a
     single turn. Returns None for "auto"/missing/unrecognized codes,
@@ -3670,12 +4067,13 @@ def build_llm_context(
     conversation_id: int,
     conversation_row,
     rag_message,
+    user_id: int | None = None,
     language_message=None,
     research_message=None,
     canvas_message=None,
     image_style_message=None,
 ):
-    _id, _title, _created_at, summary, summarized_through = (
+    _id, _title, _created_at, summary, summarized_through, *_rest = (
         conversation_row
     )
 
@@ -3697,6 +4095,11 @@ def build_llm_context(
     generation_message = build_generation_capability_message()
     if generation_message:
         context.append(generation_message)
+
+    if user_id is not None:
+        memory_message = build_memory_context_message(user_id)
+        if memory_message:
+            context.append(memory_message)
 
     if summary:
         context.append({
@@ -3993,10 +4396,11 @@ def build_streaming_response(
             conversation_id,
             conversation,
             rag_message,
-            language_message,
-            research_message,
-            canvas_message,
-            image_style_message,
+            user_id=user_id,
+            language_message=language_message,
+            research_message=research_message,
+            canvas_message=canvas_message,
+            image_style_message=image_style_message,
         )
 
         models_to_try = (
@@ -4146,6 +4550,13 @@ def build_streaming_response(
                     )
             except Exception as error:  # noqa: BLE001
                 print(f"EASTA: post-turn summarization skipped: {error!r}")
+
+            try:
+                maybe_extract_memory(
+                    conversation_id, user_id, latest_user_text
+                )
+            except Exception as error:  # noqa: BLE001
+                print(f"EASTA: post-turn memory extraction skipped: {error!r}")
 
     return StreamingResponse(
         generate(),
@@ -4592,6 +5003,52 @@ def get_account_plan(request: Request):
     return {"plan": user[5]}
 
 
+@app.get("/api/account/memory")
+def list_user_memory(request: Request):
+    """Backs the /account "Remembered" list -- give the user full
+    visibility into what's been extracted about them, not a memory
+    system they can't see or correct."""
+    user_id = require_user(request)
+
+    rows = get_user_memory(user_id)
+
+    return {
+        "memory": [
+            {
+                "id": memory_id,
+                "content": content,
+                "source_conversation_id": source_conversation_id,
+                "created_at": serialize_datetime(created_at),
+            }
+            for memory_id, content, source_conversation_id, created_at in rows
+        ]
+    }
+
+
+@app.delete("/api/account/memory/{memory_id}")
+def delete_user_memory_route(memory_id: int, request: Request):
+    user_id = require_user(request)
+
+    deleted = delete_user_memory_item(memory_id, user_id)
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Memory item not found.",
+        )
+
+    return {"message": "Memory item deleted."}
+
+
+@app.delete("/api/account/memory")
+def clear_user_memory_route(request: Request):
+    user_id = require_user(request)
+
+    clear_user_memory(user_id)
+
+    return {"message": "All remembered items cleared."}
+
+
 @app.get("/api/account/api-keys")
 def list_api_keys(request: Request):
     user_id = require_user(request)
@@ -4674,10 +5131,42 @@ def list_conversations(request: Request):
                 "created_at": serialize_datetime(row[2]),
                 "chat_number": row[3],
                 "label": build_conversation_label(row[3], row[2]),
+                "pinned": row[4],
+                "folder": row[5],
+                "share_token": row[6],
             }
         )
 
     return {"conversations": conversations}
+
+
+@app.get("/api/conversations/search")
+def search_conversations_route(q: str, request: Request):
+    """Registered before the parameterized /api/conversations/{id}...
+    routes below on principle (specific literal paths before dynamic
+    ones), though there's currently no GET route on the bare
+    single-segment shape those would collide with."""
+    user_id = require_user(request)
+
+    query = q.strip()
+
+    if not query:
+        return {"results": []}
+
+    rows = search_conversations(query, user_id)
+
+    return {
+        "results": [
+            {
+                "id": conversation_id,
+                "title": title,
+                "created_at": serialize_datetime(created_at),
+                "snippet": snippet,
+                "match_type": match_type,
+            }
+            for conversation_id, title, created_at, snippet, match_type in rows
+        ]
+    }
 
 
 @app.post("/api/conversations")
@@ -4696,11 +5185,15 @@ def new_conversation(request: Request):
 
 
 @app.patch("/api/conversations/{conversation_id}")
-def rename_conversation(
+def update_conversation_route(
     conversation_id: int,
-    data: RenameConversationRequest,
+    data: ConversationUpdateRequest,
     request: Request,
 ):
+    """Partial update: title (rename), pinned, and/or folder -- only
+    whichever fields the client actually included in the request body
+    are touched (see ConversationUpdateRequest / exclude_unset=True
+    below), so e.g. a pin toggle doesn't need to also resend title."""
     user_id = require_user(request)
 
     conversation = get_conversation(conversation_id, user_id)
@@ -4711,17 +5204,42 @@ def rename_conversation(
             detail="Conversation not found.",
         )
 
-    title = data.title.strip()[:100]
+    provided = data.model_dump(exclude_unset=True)
+    fields_to_update = {}
 
-    if not title:
-        raise HTTPException(
-            status_code=400,
-            detail="Title is required.",
-        )
+    if "title" in provided:
+        title = (data.title or "").strip()[:100]
 
-    update_conversation_title(conversation_id, title)
+        if not title:
+            raise HTTPException(
+                status_code=400,
+                detail="Title is required.",
+            )
 
-    return {"conversation": {"id": conversation_id, "title": title}}
+        fields_to_update["title"] = title
+
+    if "pinned" in provided:
+        fields_to_update["pinned"] = bool(data.pinned)
+
+    if "folder" in provided:
+        # An empty/whitespace-only folder name clears it, same as
+        # explicitly sending folder: null -- both mean "unfiled".
+        folder = (data.folder or "").strip()[:50]
+        fields_to_update["folder"] = folder or None
+
+    if fields_to_update:
+        update_conversation_fields(conversation_id, fields_to_update)
+
+    updated = get_conversation(conversation_id, user_id)
+
+    return {
+        "conversation": {
+            "id": conversation_id,
+            "title": updated[1],
+            "pinned": updated[5],
+            "folder": updated[6],
+        }
+    }
 
 
 @app.delete("/api/conversations/{conversation_id}")
@@ -4742,6 +5260,88 @@ def remove_conversation(
     delete_conversation(conversation_id)
 
     return {"message": "Conversation deleted."}
+
+
+@app.post("/api/conversations/{conversation_id}/share")
+def share_conversation(conversation_id: int, request: Request):
+    """Generates (or regenerates, if already shared) an unguessable
+    token and returns the public read-only link. Sharing is strictly
+    opt-in -- share_token is NULL by default for every conversation,
+    and this is the only place that ever sets it."""
+    user_id = require_user(request)
+
+    conversation = get_conversation(conversation_id, user_id)
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    token = secrets.token_urlsafe(32)
+    set_conversation_share_token(conversation_id, token)
+
+    return {
+        "share_token": token,
+        "share_url": f"{FRONTEND_URL}/shared/{token}",
+    }
+
+
+@app.post("/api/conversations/{conversation_id}/unshare")
+def unshare_conversation(conversation_id: int, request: Request):
+    """Immediately invalidates any link already handed out for this
+    conversation -- the token stops matching any row, so
+    GET /api/shared/{token} 404s for it from this point on."""
+    user_id = require_user(request)
+
+    conversation = get_conversation(conversation_id, user_id)
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    clear_conversation_share_token(conversation_id)
+
+    return {"message": "Conversation unshared."}
+
+
+@app.get("/api/shared/{share_token}")
+def get_shared_conversation(share_token: str):
+    """Deliberately unauthenticated (no require_user()) -- this is the
+    public read-only view a stranger reaches from a copied share link,
+    not an /api/* route for the app's own logged-in user. Returns only
+    this one conversation's title/messages, nothing account-related;
+    see get_conversation_by_share_token()'s docstring for why the
+    lookup itself can't leak more than that even by mistake."""
+    result = get_conversation_by_share_token(share_token)
+
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail="This link is invalid or no longer shared.",
+        )
+
+    conversation_id, title = result
+    rows = get_messages(conversation_id)
+
+    messages = []
+    for role, content, created_at, message_id, attachments in rows:
+        messages.append(
+            {
+                "id": message_id,
+                "role": role,
+                "content": content,
+                "created_at": serialize_datetime(created_at),
+                "attachments": attachments or [],
+            }
+        )
+
+    return {
+        "title": title,
+        "messages": messages,
+    }
 
 
 @app.get("/api/conversations/{conversation_id}/messages")
@@ -4779,6 +5379,7 @@ def list_messages(
             "id": conversation[0],
             "title": conversation[1],
             "created_at": serialize_datetime(conversation[2]),
+            "share_token": conversation[7],
         },
         "messages": messages,
     }
@@ -6015,10 +6616,9 @@ def run_public_chat_turn(
         conversation_id,
         conversation,
         rag_message,
-        language_message,
-        None,
-        canvas_message,
-        None,
+        user_id=user_id,
+        language_message=language_message,
+        canvas_message=canvas_message,
     )
 
     models_to_try = (
@@ -6095,6 +6695,11 @@ def run_public_chat_turn(
                 maybe_summarize_conversation(conversation_id, fresh_conversation)
         except Exception as error:  # noqa: BLE001
             print(f"EASTA: post-turn summarization skipped (v1 chat): {error!r}")
+
+        try:
+            maybe_extract_memory(conversation_id, user_id, latest_user_text)
+        except Exception as error:  # noqa: BLE001
+            print(f"EASTA: post-turn memory extraction skipped (v1 chat): {error!r}")
 
     return complete_response
 

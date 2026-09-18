@@ -30,5 +30,17 @@
     "conversation_delete_title": "Delete conversation",
     "conversation_delete_confirm_message": "Delete this conversation?",
     "conversation_delete_confirm_yes": "Delete",
-    "conversation_delete_confirm_cancel": "Cancel"
+    "conversation_delete_confirm_cancel": "Cancel",
+    "conversation_search_placeholder": "Search conversations...",
+    "conversation_search_no_results": "No matching conversations.",
+    "sidebar_pinned_heading": "Pinned",
+    "conversation_menu_title": "Conversation options",
+    "conversation_pin_label": "📌 Pin",
+    "conversation_unpin_label": "📌 Unpin",
+    "conversation_folder_label": "📁 Move to folder",
+    "conversation_folder_placeholder": "Folder name (blank to remove)",
+    "conversation_share_label": "🔗 Share",
+    "conversation_copy_link_label": "🔗 Copy share link",
+    "conversation_link_copied_label": "✅ Link copied!",
+    "conversation_unshare_label": "🚫 Stop sharing"
 }

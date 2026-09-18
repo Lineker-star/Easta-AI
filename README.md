@@ -779,6 +779,147 @@ production traffic. Pick these up in Cursor:
     request a browser fires automatically) and confirmed
     `200 image/x-icon`, byte-identical to the explicit
     `/static/icons/favicon.ico` the `<link>` tag points to.
+- **Search across conversations (Phase 18)** — `GET
+  /api/conversations/search?q=...` searches both conversation titles
+  and message content, scoped to the current user, via Postgres
+  full-text search (`to_tsvector`/`websearch_to_tsquery`/`ts_rank_cd`)
+  the same way `documents`/RAG grounding already does — not a `LIKE`
+  scan. New `messages.search_vector` column (`tsvector`) + GIN index,
+  populated at insert time in `save_message()`; backfilled for
+  pre-existing rows in `database/schema.sql`. One result per
+  conversation (its single best-ranked match, title or message),
+  ranked and deduplicated in SQL via a `DISTINCT ON` over a `UNION ALL`
+  of title/message matches. The matched snippet is highlighted with
+  `ts_headline()` — but rather than trust its raw `<b>`/`</b>` output
+  directly into the page (which wouldn't escape a user's own message
+  content containing literal `<`/`>`/`&`), `search_conversations()` in
+  `backend/app.py` uses control-character delimiters, `html.escape()`s
+  the *whole* snippet first, and only then swaps those delimiters for
+  real `<mark>` tags — verified this actually neutralizes a `<script>`
+  in test content while still highlighting a real match. A search box
+  above the sidebar's conversation list (debounced, 300ms) swaps the
+  list for results; clearing it restores the normal view.
+- **Pinning and folders (Phase 19)** — new `conversations.pinned`
+  (boolean) and `conversations.folder` (free-text, nullable — no
+  folder-management UI to justify a real `folders` table) columns.
+  `PATCH /api/conversations/{id}` (previously rename-only) now accepts
+  `title`/`pinned`/`folder` independently, only touching whichever
+  fields a request actually includes (Pydantic `exclude_unset=True` →
+  a small column whitelist, never trusting request keys as literal SQL
+  identifiers) — so a pin toggle doesn't need to resend the title, etc.
+  The sidebar's per-conversation actions consolidated from two loose
+  icon buttons (rename/delete) into a single "..." menu (Pin/Rename/
+  Move to folder/Delete), since four crammed hover-reveal icons in a
+  ~280px row stops being "small" — folder assignment reuses the same
+  inline-input pattern as rename (save on Enter/blur, cancel on
+  Escape; a blank name clears the folder). Conversations render as a
+  **Pinned** section first, then each folder as a collapsible
+  `<details>`/`<summary>` section (native keyboard support, no custom
+  JS needed for expand/collapse), then unfiled conversations
+  chronologically — a conversation that's both pinned and foldered
+  shows only under Pinned, not duplicated.
+  - Fixed two bugs surfaced while extending `conversations` rows to
+    carry the new columns: `build_llm_context()` and
+    `maybe_summarize_conversation()` both destructured the row with a
+    fixed 5-value unpack (`_id, _title, _created_at, summary,
+    summarized_through = conversation_row`), which would have raised
+    "too many values to unpack" the moment `get_conversation()`
+    started returning `pinned`/`folder` too — caught before it could
+    ship, fixed with a trailing `*_rest`.
+  - Also fixed a real (if narrow) existing CSS bug while building the
+    new menu's open animation: `@keyframes popover-in` was defined
+    *inside* the composer's `@media (max-width: 560px)` block, making
+    it silently unusable by anything outside that breakpoint — moved
+    to the top level so both the composer's mobile popover and the
+    new conversation menu can use it regardless of viewport width.
+- **Shareable read-only conversation links (Phase 20)** — a real
+  privacy surface, treated deliberately: sharing is opt-in per
+  conversation (`conversations.share_token` is `NULL` by default and
+  only ever set by an explicit "Share" click), instantly revocable
+  (unsharing or re-sharing just changes what's in that one column, so
+  an old link stops matching anything immediately), and the public
+  view can't leak anything about the account that created it.
+  - `POST /api/conversations/{id}/share` generates a
+    `secrets.token_urlsafe(32)` token (256 bits — the actual
+    protection here, not obscurity) and returns the link;
+    `POST /api/conversations/{id}/unshare` clears it. Both ownership-
+    scoped like every other conversation endpoint. Re-sharing an
+    already-shared conversation rotates the token, which *is* how
+    "regenerating invalidates old links" works — no separate code path
+    needed.
+  - `GET /api/shared/{token}` is deliberately unauthenticated (no
+    `require_user()` — this is the page a stranger with just the link
+    reaches) and its DB lookup (`get_conversation_by_share_token()`)
+    selects *only* `id`/`title`, never `user_id`/email/username/other
+    conversations, so there's nothing to accidentally leak even by a
+    future careless edit to that one query.
+  - Token stored as **plaintext**, not hashed like `api_keys.key_hash`
+    — a deliberate, different tradeoff from that column, explained in
+    `database/schema.sql`: a share link is meant to be re-shown/re-
+    copied later (reopening the Share menu item), not a write-once
+    secret, and it only grants read-only access to one conversation,
+    not account access.
+  - Sidebar: the conversation menu's "Share" item (added in the same
+    Phase 19 menu, before Delete) creates the link, copies it
+    (`navigator.clipboard`), and swaps its own label to "Link copied!"
+    for a second — already-shared conversations show "Copy share
+    link" instead (re-copying the existing link without rotating it)
+    plus a separate "Stop sharing" item.
+  - Public read-only page at `/shared/{token}`
+    (`frontend/templates/shared.html` + `frontend/static/shared.js`,
+    a new ~130-line standalone file, not a repurposed `chat.js` — no
+    session cookie sent, no sidebar, no composer): fetches the one
+    unauthenticated endpoint and renders title + messages (Markdown
+    rendered the same way as the real chat UI, plus any image
+    attachments) or a clear "invalid or no longer shared" state for a
+    revoked/bad token.
+  - Verified end-to-end via `TestClient`: ownership-scoping (404 for
+    non-owned), the public endpoint requiring no auth, an invalid
+    token 404ing, and — explicitly asserted, not just eyeballed — that
+    a valid share response's top-level JSON keys are exactly
+    `{title, messages}` and nothing else.
+- **Cross-conversation memory (Phase 21)** — new `user_memory` table:
+  short, durable facts about a user (id, user_id, content,
+  source_conversation_id, created_at), distinct from any single
+  conversation's own history. Deliberately much more conservative than
+  the existing conversation-summarization feature it sits next to in
+  `backend/app.py`:
+  - A cheap keyword pre-filter (`_message_might_contain_durable_fact()`
+    — "i am", "my name", "i prefer", "remember that", etc.) decides
+    whether a user's message is even worth checking, so the extraction
+    LLM call fires only on messages that plausibly contain a personal
+    fact, not every single turn — a real cost-control measure, not
+    just a latency one.
+  - Only messages that pass the pre-filter go to `FAST_MODEL` (a
+    simple classification task, not worth the smart model) with a
+    prompt that explicitly disallows inferring/guessing anything not
+    directly stated, and returns the literal word `NONE` — expected to
+    be the common outcome — when there's nothing durable to keep.
+  - Stored facts are injected into `build_llm_context()` (which now
+    takes a `user_id` parameter to do this) as their own clearly-
+    labeled system message, capped at the 20 most recent
+    (`MAX_MEMORY_ITEMS_IN_CONTEXT`), explicitly told to the model as
+    "stated previously, not verified fact."
+  - Full user visibility and control on `/account`'s new "Remembered"
+    panel: list everything stored, delete an individual item, or clear
+    all — `GET`/`DELETE /api/account/memory` and
+    `DELETE /api/account/memory/{id}`.
+  - Verified with mocked LLM responses: a real extracted fact gets
+    saved with the right args; a `NONE` response saves nothing; a
+    message that doesn't pass the keyword pre-filter never calls the
+    LLM at all; the feature flag (`EASTA_ENABLE_MEMORY`) off skips it
+    entirely; an LLM call failure is caught and logged rather than
+    breaking the turn. Also confirmed the memory system message is
+    correctly present in `build_llm_context()`'s output when stored
+    items exist, and correctly absent (no crash) when no `user_id` is
+    passed at all.
+  - Fixed a real bug caught while adding the `user_id` parameter to
+    `build_llm_context()`: both existing call sites passed every
+    argument *positionally*, so inserting a new parameter in the
+    middle of the signature would have silently shifted
+    `language_message` into the new `user_id` slot and so on down the
+    line — every call site rewritten to use keyword arguments instead,
+    which is what should have been used there from the start.
 
 ## Run locally
 

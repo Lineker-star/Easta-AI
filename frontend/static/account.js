@@ -58,6 +58,10 @@ const newApiKeyReveal = document.getElementById("new-api-key-reveal");
 const newApiKeyValue = document.getElementById("new-api-key-value");
 const copyNewApiKeyButton = document.getElementById("copy-new-api-key");
 
+const memoryError = document.getElementById("memory-error");
+const memoryList = document.getElementById("memory-list");
+const clearMemoryButton = document.getElementById("clear-memory-button");
+
 
 function capitalize(text) {
     if (!text) {
@@ -305,6 +309,100 @@ copyNewApiKeyButton.addEventListener("click", () => {
 });
 
 
+function renderMemory(items) {
+    memoryList.innerHTML = "";
+    clearMemoryButton.hidden = items.length === 0;
+
+    if (items.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "usage-empty";
+        empty.textContent = "Nothing remembered yet.";
+        memoryList.appendChild(empty);
+        return;
+    }
+
+    const table = document.createElement("table");
+    table.className = "usage-table";
+
+    const thead = document.createElement("thead");
+    thead.innerHTML = "<tr><th>Remembered</th><th>Since</th><th></th></tr>";
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+
+    items.forEach((item) => {
+        const row = document.createElement("tr");
+
+        const contentCell = document.createElement("td");
+        contentCell.textContent = item.content;
+
+        const createdCell = document.createElement("td");
+        createdCell.textContent = formatDateTime(item.created_at);
+
+        const actionCell = document.createElement("td");
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "message-action-button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteMemoryItem(item.id));
+        actionCell.appendChild(deleteButton);
+
+        row.appendChild(contentCell);
+        row.appendChild(createdCell);
+        row.appendChild(actionCell);
+        tbody.appendChild(row);
+    });
+
+    table.appendChild(tbody);
+
+    const scrollWrap = document.createElement("div");
+    scrollWrap.className = "table-scroll";
+    scrollWrap.appendChild(table);
+    memoryList.appendChild(scrollWrap);
+}
+
+
+async function loadMemory() {
+    const response = await apiRequest("/api/account/memory");
+    const data = await readJsonResponse(response);
+    renderMemory(data.memory);
+}
+
+
+async function deleteMemoryItem(memoryId) {
+    memoryError.textContent = "";
+
+    try {
+        const response = await apiRequest(`/api/account/memory/${memoryId}`, {
+            method: "DELETE"
+        });
+        await readJsonResponse(response);
+        await loadMemory();
+    } catch (error) {
+        memoryError.textContent = error.message;
+    }
+}
+
+
+clearMemoryButton.addEventListener("click", async () => {
+    if (!window.confirm("Clear everything EASTA has remembered about you? This can't be undone.")) {
+        return;
+    }
+
+    memoryError.textContent = "";
+
+    try {
+        const response = await apiRequest("/api/account/memory", {
+            method: "DELETE"
+        });
+        await readJsonResponse(response);
+        await loadMemory();
+    } catch (error) {
+        memoryError.textContent = error.message;
+    }
+});
+
+
 async function initializeAccountPage() {
     try {
         await loadAccount();
@@ -318,6 +416,13 @@ async function initializeAccountPage() {
     } catch (error) {
         console.error(error);
         apiKeysError.textContent = error.message || "Could not load your API keys.";
+    }
+
+    try {
+        await loadMemory();
+    } catch (error) {
+        console.error(error);
+        memoryError.textContent = error.message || "Could not load remembered items.";
     }
 }
 

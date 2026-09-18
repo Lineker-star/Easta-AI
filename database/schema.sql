@@ -100,8 +100,44 @@ CREATE TABLE IF NOT EXISTS public.conversations (
     title character varying(100) DEFAULT 'New Chat'::character varying NOT NULL,
     summary text,
     summarized_through_message_id integer,
+    -- Phase 19: pin a conversation above the regular chronological
+    -- list, and/or file it under a free-text folder label. A simple
+    -- nullable text column rather than a folders table -- there's no
+    -- folder management UI (rename/delete a folder as an object) to
+    -- justify one; see backend/app.py's sidebar folder grouping.
+    pinned boolean NOT NULL DEFAULT false,
+    folder character varying(50),
+    -- Phase 20: read-only public sharing, opt-in per conversation.
+    -- NULL (the default for every row) means "not shared" -- a token
+    -- only ever exists here after the owner explicitly calls
+    -- POST /api/conversations/{id}/share, and clearing it (unshare,
+    -- or sharing again to rotate it) immediately invalidates any link
+    -- already handed out, since GET /api/shared/{token} is a direct
+    -- equality lookup against whatever's currently in this column.
+    -- Stored as plaintext rather than hashed like api_keys.key_hash --
+    -- deliberately different tradeoff: a share link is meant to be
+    -- shown/copied again later (e.g. reopening the Share panel), not
+    -- a write-once secret, and unlike a password or API key this only
+    -- grants read-only access to one conversation's messages, not
+    -- account access.
+    share_token character varying(64) UNIQUE,
+    shared_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
+
+-- Safe to re-run against a database created before these columns
+-- existed.
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS folder character varying(50);
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS share_token character varying(64) UNIQUE;
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS shared_at timestamp with time zone;
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user_pinned
+    ON public.conversations (user_id, pinned DESC, created_at DESC);
+
+-- No separate index on share_token: the UNIQUE constraint above
+-- already creates one, so GET /api/shared/{token}'s lookup is already
+-- indexed without a redundant duplicate.
 
 --
 -- messages
@@ -121,15 +157,34 @@ CREATE TABLE IF NOT EXISTS public.messages (
     role character varying(20) NOT NULL,
     content text NOT NULL,
     attachments jsonb,
+    -- Powers GET /api/conversations/search (Phase 18) the same way
+    -- documents.search_vector already powers RAG grounding below --
+    -- populated at insert time by save_message() in backend/app.py,
+    -- same reasoning as documents: messages are never edited in place
+    -- (editing a message deletes it and re-inserts fresh, see
+    -- edit_message() in backend/app.py), so a column set once at
+    -- insert can't go stale the way it could if content were mutable.
+    search_vector tsvector,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT messages_role_check CHECK (((role)::text = ANY ((ARRAY['user'::character varying, 'assistant'::character varying])::text[])))
 );
 
--- Safe to re-run against a database created before this column existed.
+-- Safe to re-run against a database created before these columns existed.
 ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS attachments jsonb;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS search_vector tsvector;
+
+-- One-time backfill for rows inserted before search_vector existed --
+-- idempotent (only touches rows that still have no vector), so safe
+-- to re-run alongside the rest of this file.
+UPDATE public.messages
+SET search_vector = to_tsvector('english', content)
+WHERE search_vector IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
     ON public.messages (conversation_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_messages_search_vector
+    ON public.messages USING GIN (search_vector);
 
 --
 -- documents
@@ -306,3 +361,30 @@ CREATE TABLE IF NOT EXISTS public.transcription_items (
 
 CREATE INDEX IF NOT EXISTS idx_transcription_items_job_id
     ON public.transcription_items (job_id, created_at);
+
+--
+-- user_memory
+-- Phase 21: short, durable facts about a user extracted across
+-- conversations (stated preferences/standing context -- "I'm
+-- vegetarian", "I go by Alex") -- distinct from any single
+-- conversation's own message history, injected into every future
+-- conversation's system context (see build_memory_context_message()
+-- in backend/app.py). A brand new table, so CREATE TABLE IF NOT
+-- EXISTS alone is correct here -- no ALTER TABLE needed (see this
+-- file's own header comment on when one is vs. isn't required).
+-- source_conversation_id is ON DELETE SET NULL, not CASCADE: deleting
+-- the conversation a fact was noticed in shouldn't delete the fact
+-- itself, only detach where it came from -- same reasoning as
+-- usage_logs.conversation_id above.
+--
+
+CREATE TABLE IF NOT EXISTS public.user_memory (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    content text NOT NULL,
+    source_conversation_id integer REFERENCES public.conversations(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_memory_user_id
+    ON public.user_memory (user_id, created_at DESC);

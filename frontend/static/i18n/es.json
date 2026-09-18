@@ -30,5 +30,17 @@
     "conversation_delete_title": "Eliminar conversación",
     "conversation_delete_confirm_message": "¿Eliminar esta conversación?",
     "conversation_delete_confirm_yes": "Eliminar",
-    "conversation_delete_confirm_cancel": "Cancelar"
+    "conversation_delete_confirm_cancel": "Cancelar",
+    "conversation_search_placeholder": "Buscar conversaciones...",
+    "conversation_search_no_results": "No se encontraron conversaciones.",
+    "sidebar_pinned_heading": "Fijadas",
+    "conversation_menu_title": "Opciones de la conversación",
+    "conversation_pin_label": "📌 Fijar",
+    "conversation_unpin_label": "📌 Dejar de fijar",
+    "conversation_folder_label": "📁 Mover a una carpeta",
+    "conversation_folder_placeholder": "Nombre de la carpeta (vacío para quitar)",
+    "conversation_share_label": "🔗 Compartir",
+    "conversation_copy_link_label": "🔗 Copiar enlace",
+    "conversation_link_copied_label": "✅ ¡Enlace copiado!",
+    "conversation_unshare_label": "🚫 Dejar de compartir"
 }

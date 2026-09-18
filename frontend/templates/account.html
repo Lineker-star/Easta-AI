@@ -232,6 +232,31 @@
             </div>
         </div>
 
+        <div class="usage-panel">
+            <h2>Remembered</h2>
+
+            <p class="account-meta">
+                EASTA remembers a small number of durable facts you've
+                explicitly stated across conversations — like your
+                name or a stated preference — to use in future ones.
+                Never anything inferred or guessed. Delete anything
+                that's wrong, or that you'd rather it forget.
+            </p>
+
+            <p id="memory-error" class="error-message"></p>
+
+            <div id="memory-list"></div>
+
+            <button
+                type="button"
+                class="btn btn-secondary"
+                id="clear-memory-button"
+                hidden
+            >
+                Clear all
+            </button>
+        </div>
+
     </div>
 
     <script>
