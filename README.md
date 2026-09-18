@@ -145,9 +145,12 @@ production traffic. Pick these up in Cursor:
   `GET /api/generated/{id}/download`. Gate the whole feature with
   `EASTA_ENABLE_GENERATION`. The Markdown→PDF/DOCX renderers
   (`render_markdown_to_pdf()` / `render_markdown_to_docx()` in
-  `backend/app.py`) were rewritten in Phase 15 — see that entry below
-  for what changed. ⚠️ **Still prototype-grade**: generated files are
-  stored as raw bytes in Postgres, the same tradeoff as
+  `backend/app.py`) were rewritten in Phase 15 and now cover tables,
+  nested lists, and images — no longer the "limited subset" flagged
+  here in earlier passes; see that entry below for what changed and
+  what's still a known gap there (e.g. the `xhtml2pdf` vs. WeasyPrint
+  tradeoff). ⚠️ **Still prototype-grade**: generated files are stored
+  as raw bytes in Postgres, the same tradeoff as
   `messages.attachments` — swap for object storage before relying on
   this at real scale.
 - **Voice: speech-to-text and text-to-speech** — a 🎤 mic button in
@@ -538,6 +541,97 @@ production traffic. Pick these up in Cursor:
     reportlab / `_markdown_inline_to_reportlab()` /
     `_add_markdown_runs()` directly — deliberately a different tool,
     not consolidated into the above.
+- **Google Sign-In** — standard OAuth 2.0 Authorization Code flow,
+  application code (not a Sevalla platform feature — see
+  `GET /api/auth/google/login` / `GET /api/auth/google/callback` in
+  `backend/app.py`):
+  - **Schema**: `users.google_id` (nullable, unique) and
+    `users.auth_provider` (`'password'` | `'google'`, default
+    `'password'`) added; `users.password_hash` is now nullable, since
+    a Google-only account has none.
+  - **Login**: `GET /api/auth/google/login` redirects to Google's
+    consent screen with a random per-attempt `state` token stashed in
+    the session (CSRF protection for the flow); `GET
+    /api/auth/google/callback` checks that `state` matches, exchanges
+    the returned `code` for a token, fetches the profile from Google's
+    `userinfo` endpoint, and sets the session cookie exactly like
+    `POST /api/login` does — then redirects the browser (a real
+    redirect, not JSON, since this is a full-page OAuth round trip) to
+    `{FRONTEND_URL}/chat` on success or `{FRONTEND_URL}/login?error=...`
+    on failure (`login.js` reads that query param into the existing
+    error element).
+  - **Find-or-create**: matches an existing account by `google_id`
+    first; if none, and Google reports the email as verified, links
+    the Google account to an existing password account with that email
+    (`link_google_id()`) rather than erroring or creating a duplicate;
+    otherwise creates a new Google-only account with a username
+    auto-generated from the Google profile name (`generate_unique_username()`,
+    collision-safe — appends `_1`, `_2`, ... if taken).
+  - **Frontend**: a "Continue with Google" link on `login.html` /
+    `register.html` — a plain `<a href="{{ backend_url }}/api/auth/google/login">`,
+    not a `fetch()` call, since OAuth needs the actual browser to
+    navigate to Google. Hidden by default and only revealed once
+    `GET /api/features` reports `google_signin: true` — same
+    hide-rather-than-show-broken pattern as the mic button / Research
+    toggle, so the button doesn't appear (and 503) before
+    `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are actually set.
+  - **New env vars**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+    `GOOGLE_REDIRECT_URI` (see `backend/.env.example`) — all optional;
+    unset just keeps the feature hidden rather than failing startup.
+  - Fixed two related null-`password_hash` crashes surfaced by making
+    that column nullable: `POST /api/login` and
+    `PUT /api/account/password` both called `check_password_hash()`
+    unconditionally, which raises on `None` — a Google-only account
+    hitting either now gets a clean 401/400 instead of a 500.
+  - ⚠️ **Not tested against real Google credentials** (none are
+    configured in this environment) — the full callback logic (state
+    verification, token exchange, profile fetch, find/link/create) was
+    exercised with `unittest.mock` standing in for Google's token and
+    userinfo endpoints, covering: a brand-new user, an existing
+    password account linked by verified email, a returning Google
+    user, an unverified-email profile (confirmed it creates a new
+    account rather than auto-linking), and username collisions. Test
+    against a real Google Cloud Console OAuth client before relying on
+    this in production.
+- **PWA installability audit** — the manifest/service worker/icons
+  from the "Installable app (PWA)" entry above already existed; this
+  phase audited them against Lighthouse's actual PWA installability
+  criteria (no deployed instance or browser available in this
+  environment to run Lighthouse itself, so this was a checklist-by-
+  checklist code review instead) and fixed the one real gap found:
+  - **Fixed**: the service worker's `fetch` handler only ever
+    intercepted requests under `/static/` — a page navigation (loading
+    `/chat`, `/login`, `/`, ...) was never handled at all, so it fell
+    straight through to the browser's own offline error page on a
+    flaky connection instead of anything EASTA controls. This is
+    specifically what Lighthouse's "current page responds with a 200
+    when offline" check looks for. Fixed with a standard
+    network-falling-back-to-a-cached-offline-page pattern: navigation
+    requests (`event.request.mode === "navigate"`) now try the network
+    first and fall back to a new `/offline` page
+    (`frontend/templates/offline.html`, cached during service worker
+    install) on failure — see `frontend/static/sw.js`. Cache bumped to
+    `easta-shell-v3` so existing installs pick up the new fetch
+    handler and cached offline page.
+  - **Confirmed already correct** (no change needed): `manifest.json`
+    has `name`/`short_name`/`start_url`/`display: standalone`/
+    `theme_color`/`background_color` matching the brand exactly, and
+    192×192 + 512×512 icons (plus a maskable variant — verified its
+    logo sits well inside Google's 80% safe-zone circle, ~28% of the
+    canvas, so it won't get clipped by Android's mask shapes); the
+    service worker registers at the root scope so it controls
+    `start_url` (`/chat`); every page includes both `_pwa_head.html`
+    (manifest link + `theme-color` meta + apple-touch-icon) and
+    `pwa.js` (service worker registration), not just the chat page.
+  - ⚠️ **Not run against a real Lighthouse audit** — there's no
+    deployed instance or Chrome available in this environment. Run
+    Chrome DevTools → Lighthouse → PWA against the actual deployed URL
+    before treating this as the final word; HTTPS (required for
+    service workers and for Lighthouse's installability check, and not
+    something this checklist could verify either) should already be
+    covered by Sevalla's default TLS, but confirm it.
+  - No paid API calls in this phase (manifest/service-worker/template
+    work only) — nothing new to log to `usage_logs`.
 
 ## Run locally
 
@@ -943,6 +1037,12 @@ application.
   swapping `render_markdown_to_pdf()`'s `xhtml2pdf` backend for
   WeasyPrint for fuller CSS/CommonMark coverage (see the Phase 15
   entry above for why `xhtml2pdf` was chosen instead this round).
+- Add a way for a Google-only account (`auth_provider = 'google'`,
+  `password_hash IS NULL`) to set a password from the Account page —
+  right now that page's password form just cleanly rejects them
+  ("This account signed up with Google and has no password set")
+  rather than offering a path to add one, so a Google-only user has no
+  way to also get a username/password login.
 - Replace TTS's flat per-character cost estimate
   (`TTS_FALLBACK_COST_USD_PER_1K_CHARS`) with a real per-call cost
   once you confirm how OpenRouter reports one for

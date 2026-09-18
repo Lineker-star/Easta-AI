@@ -6,14 +6,16 @@
  * GET /sw.js in frontend/app.py) so it can control the whole site,
  * not just /static/. */
 
-const CACHE_NAME = "easta-shell-v2";
+const CACHE_NAME = "easta-shell-v3";
+const OFFLINE_URL = "/offline";
 
 const SHELL_ASSETS = [
     "/static/styles.css",
     "/static/chat.js",
     "/static/i18n.js",
     "/static/icons/icon-192.png",
-    "/static/icons/icon-512.png"
+    "/static/icons/icon-512.png",
+    OFFLINE_URL
 ];
 
 self.addEventListener("install", (event) => {
@@ -46,6 +48,21 @@ self.addEventListener("fetch", (event) => {
     const url = new URL(event.request.url);
 
     if (event.request.method !== "GET" || url.origin !== self.location.origin) {
+        return;
+    }
+
+    // Page navigations (loading /chat, /login, /, ... -- not a
+    // sub-resource fetch): network first, falling back to the cached
+    // offline page when the network is unreachable. Without this
+    // branch the service worker never intercepted navigations at all,
+    // so a flaky-connection launch fell straight through to the
+    // browser's own offline error page instead of the app -- this is
+    // also specifically what Lighthouse's PWA audit checks ("current
+    // page responds with a 200 when offline").
+    if (event.request.mode === "navigate") {
+        event.respondWith(
+            fetch(event.request).catch(() => caches.match(OFFLINE_URL))
+        );
         return;
     }
 

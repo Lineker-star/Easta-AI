@@ -81,6 +81,18 @@ def transcriptions(job_id=None):
     )
 
 
+@app.get("/offline")
+def offline():
+    # Cached by the service worker as the navigation fallback when the
+    # network is unreachable -- see frontend/static/sw.js's
+    # OFFLINE_URL. Not linked from anywhere in the UI; only ever
+    # reached via that fallback.
+    return render_template(
+        "offline.html",
+        backend_url=BACKEND_URL,
+    )
+
+
 @app.get("/sw.js")
 def service_worker():
     # Served at the site root (not /static/sw.js) so its default scope
