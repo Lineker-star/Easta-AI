@@ -2,6 +2,39 @@
 -- EASTA database schema
 -- (PostgreSQL 14+; uses only built-in full-text search, no extensions required)
 --
+-- STANDING CONVENTION -- read this before adding a column to a table
+-- that already exists below (users/conversations/messages/etc, as
+-- opposed to a brand new table):
+--
+-- `CREATE TABLE IF NOT EXISTS` only runs its column list the FIRST
+-- time a table is created. Against a database where the table already
+-- exists (i.e. any deployed environment, past the very first run),
+-- editing the CREATE TABLE block alone is a silent no-op -- the new
+-- column never actually gets added, and the app starts throwing
+-- `UndefinedColumn` the moment it queries it. (This exact bug shipped
+-- once already: users.google_id was added to the CREATE TABLE block
+-- for Phase 16, correctly paired with an ALTER TABLE here in the same
+-- commit -- but production was never re-migrated by actually
+-- re-running this file after that deploy, so the column didn't exist
+-- live. The fix for that was operational, not a schema.sql change --
+-- see README.md's "Update the live application" section -- but it's
+-- exactly the failure mode this convention exists to prevent code-side.)
+--
+-- So: every column added to an EXISTING table needs BOTH of these, in
+-- the same commit --
+--   1. The updated `CREATE TABLE IF NOT EXISTS` block (so a fresh
+--      install gets the column immediately, with no separate ALTER
+--      needed).
+--   2. A matching `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`
+--      statement placed after that block (so an already-existing
+--      database converges to the same schema when this file is
+--      re-run against it).
+-- A new CHECK constraint needs the DROP CONSTRAINT IF EXISTS + ADD
+-- CONSTRAINT pattern used below for users_auth_provider_check /
+-- generated_files_kind_check, for the same reason. A brand new table
+-- needs neither -- CREATE TABLE IF NOT EXISTS alone is correct there,
+-- since there's no pre-existing version of it to migrate.
+--
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;

@@ -1056,6 +1056,27 @@ git push origin main
 Sevalla will detect the GitHub change and redeploy the affected
 application.
 
+⚠️ **This redeploys the code only — it never touches the database.**
+If your change modified `database/schema.sql` (added a column, a
+table, a constraint, ...), the running app will start querying columns
+that don't exist yet in the live database until you separately re-run
+schema.sql against it, the same command as the "Deploy PostgreSQL"
+step above:
+
+``` bash
+psql -h HOST -U USER -p PORT -d DATABASE -f database/schema.sql
+```
+
+This is safe to run any time, including against a database that
+already has some of the changes — every statement in `schema.sql` is
+written to be additive and idempotent (`CREATE TABLE IF NOT EXISTS`
+for new tables, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for columns
+added to a table that already existed — see the note at the top of
+`database/schema.sql` for why both are needed). Get in the habit of
+re-running it after every deploy that touched `schema.sql`, not just
+ones you remember changing a column — it's a no-op if nothing changed,
+so there's no cost to running it "just in case."
+
 ## Suggested next steps (in Cursor)
 
 - Swap `_duckduckgo_search()`'s DuckDuckGo scrape for a paid search API
