@@ -1173,6 +1173,60 @@ production traffic. Pick these up in Cursor:
     intermittently-stalling connection (no way to simulate real network
     throttling in this environment) — only the timeout logic itself
     and page rendering were checked directly.
+- **Error tracking with Sentry (Phase 26)** — `sentry-sdk` added to
+  both `backend/requirements.txt` (`[fastapi]` extra) and
+  `frontend/requirements.txt` (`[flask]` extra). Entirely optional,
+  same "unset = skip gracefully" pattern as Google Sign-In: a blank
+  `SENTRY_DSN` means `sentry_sdk.init()` never runs on either side, and
+  the app behaves exactly as before this phase.
+  - Backend: `sentry_sdk.init()` runs before `FastAPI()` is
+    instantiated (required for the Starlette/FastAPI integration to
+    actually instrument it), reading `SENTRY_DSN`/`SENTRY_ENVIRONMENT`/
+    `SENTRY_TRACES_SAMPLE_RATE` (default `0` — errors only, no
+    performance traces, which have separate Sentry quota/cost). A new
+    `report_error(context, error)` helper wraps the ~15 existing
+    `except Exception: print(...)` sites that were already
+    catching-and-continuing on a non-fatal background failure (model
+    fallback retries, post-turn summarization/memory extraction,
+    usage-cost logging, ...) — still prints to stdout exactly as
+    before, and now also calls `sentry_sdk.capture_exception()`, which
+    is a documented safe no-op when Sentry was never configured, so
+    `report_error()` itself never needs to branch on `SENTRY_DSN`.
+    These were genuinely invisible failures before this phase — easy
+    to miss entirely outside of actively tailing server logs.
+  - Frontend: same pattern with Flask's integration, plus a new
+    `inject_sentry_config()` context processor so every template gets
+    `sentry_dsn`/`sentry_environment` automatically without touching
+    every `render_template()` call. A new
+    `frontend/templates/_sentry_init.html` partial (included from
+    every page, the same way `_pwa_head.html`/`_theme_init.html`
+    already are) loads Sentry's official browser CDN bundle and calls
+    `Sentry.init()` client-side — but only renders anything at all
+    when `sentry_dsn` is set, so a page's HTML is byte-for-byte
+    unchanged with Sentry unconfigured. Deliberately Sentry's own CDN
+    (`browser.sentry-cdn.com`), not `cdnjs` like every other script tag
+    in this app — checked first, and `cdnjs`'s Sentry package is stuck
+    at a very old v6 release, unsuitable for a current integration.
+  - The same DSN is used on both sides on purpose: a Sentry DSN is
+    meant to be public/embeddable in client-side code (unlike an API
+    key), so there's no separate "public" vs "secret" key to manage
+    here.
+  - Verified directly against the real `sentry_sdk` package (installed
+    and imported, not mocked): `report_error()` is a safe no-op with no
+    DSN configured and correctly calls `capture_exception()` when it
+    is (checked both ways); `sentry_sdk.init()` genuinely activates a
+    live client with the configured `environment`/`traces_sample_rate`
+    when `SENTRY_DSN` is set (checked via `sentry_sdk.get_client()`);
+    routes keep working normally with Sentry active; and every page
+    renders with the Sentry script entirely absent with no DSN set,
+    and correctly present (with the right DSN/environment values
+    injected) once one is. `py_compile` passes on both `app.py` files,
+    and every Jinja template (including the new partial) parses.
+    ⚠️ **Not verified**: an event actually arriving in a real Sentry
+    project (would need a real DSN and network access to Sentry's
+    ingest endpoint, neither available in this environment) — only the
+    SDK's own local behavior (client activation, safe no-op, correct
+    config) was checked directly.
 
 ## Run locally
 

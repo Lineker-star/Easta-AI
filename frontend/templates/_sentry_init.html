@@ -1,0 +1,14 @@
+{% if sentry_dsn %}
+<script
+    src="https://browser.sentry-cdn.com/10.75.0/bundle.min.js"
+    crossorigin="anonymous"
+></script>
+<script>
+    if (window.Sentry) {
+        Sentry.init({
+            dsn: {{ sentry_dsn | tojson }},
+            environment: {{ sentry_environment | tojson }}
+        });
+    }
+</script>
+{% endif %}

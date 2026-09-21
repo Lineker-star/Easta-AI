@@ -1,11 +1,29 @@
 import os
 import urllib.parse
 
+import sentry_sdk
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, send_from_directory
+from sentry_sdk.integrations.flask import FlaskIntegration
 
 
 load_dotenv()
+
+# --- Error tracking (Phase 26) ---------------------------------------------
+# Optional -- an unset SENTRY_DSN just means sentry_sdk.init() never
+# runs (see backend/app.py's identical block for the full reasoning).
+# Must run before Flask(__name__) is instantiated so the Flask
+# integration can actually instrument it.
+SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "development")
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=SENTRY_ENVIRONMENT,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0")),
+        integrations=[FlaskIntegration()],
+    )
 
 app = Flask(__name__)
 
@@ -13,6 +31,19 @@ BACKEND_URL = os.getenv(
     "BACKEND_URL",
     "http://127.0.0.1:8000",
 )
+
+
+@app.context_processor
+def inject_sentry_config():
+    # Available in every template automatically (see
+    # _sentry_init.html) without every render_template() call needing
+    # to pass it explicitly. A Sentry DSN is meant to be public/
+    # embeddable in client-side code, unlike an API key -- safe to
+    # ship to the browser.
+    return {
+        "sentry_dsn": SENTRY_DSN,
+        "sentry_environment": SENTRY_ENVIRONMENT,
+    }
 
 
 @app.get("/")

@@ -15,3 +15,4 @@ reportlab
 python-pptx
 mistune
 xhtml2pdf
+sentry-sdk[fastapi]

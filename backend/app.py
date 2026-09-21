@@ -61,6 +61,9 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 from starlette.middleware.sessions import SessionMiddleware
 from werkzeug.security import (
     check_password_hash,
@@ -70,6 +73,31 @@ from xhtml2pdf import pisa
 
 
 load_dotenv()
+
+# --- Error tracking (Phase 26) -----------------------------------------
+# Optional, same "unset = skip gracefully" pattern as Google Sign-In
+# below -- an unset SENTRY_DSN just means sentry_sdk.init() never runs.
+# sentry_sdk itself is always imported (a hard dependency now -- see
+# requirements.txt) so report_error() further down can call
+# sentry_sdk.capture_exception() unconditionally: that's a documented
+# safe no-op when init() was never called, so nothing needs to branch
+# on SENTRY_DSN at every one of report_error()'s call sites, only here.
+# This has to run before FastAPI() is instantiated below so the
+# Starlette/FastAPI integration can actually instrument the app (it
+# hooks in at app-creation time, not afterward).
+SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "development")
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=SENTRY_ENVIRONMENT,
+        # Conservative default (0 = no performance traces sent, only
+        # errors) -- tracing has its own Sentry quota/cost separate
+        # from error events, and this app has no need for it yet.
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0")),
+        integrations=[StarletteIntegration(), FastApiIntegration()],
+    )
 
 app = FastAPI(title="EASTA API")
 
@@ -199,6 +227,21 @@ ENABLE_SERVER_STT = (
 ENABLE_SERVER_TTS = (
     os.getenv("EASTA_ENABLE_SERVER_TTS", "true").lower() == "true"
 )
+
+
+def report_error(context: str, error: Exception) -> None:
+    """Best-effort visibility for a caught, non-fatal failure that
+    already doesn't interrupt the user's turn (background
+    summarization, memory extraction, usage logging, ...) -- these used
+    to only ever show up in stdout, easy to miss entirely outside of
+    actively tailing server logs. Still prints (unchanged behavior for
+    local dev with no Sentry configured), and additionally reports to
+    Sentry when SENTRY_DSN is set. capture_exception() is a documented
+    safe no-op when sentry_sdk.init() was never called, so this never
+    needs to branch on SENTRY_DSN itself."""
+    print(f"EASTA: {context}: {error!r}")
+    sentry_sdk.capture_exception(error)
+
 
 # Tool-calling is only attempted on models that are reasonably likely to
 # support it. The free/fast model is skipped by default to keep simple
@@ -808,7 +851,7 @@ def resolve_api_key(api_key: str) -> int | None:
     try:
         touch_api_key(key_id)
     except Exception as error:  # noqa: BLE001 - best-effort, auth still succeeds
-        print(f"EASTA: api key last_used_at update failed: {error!r}")
+        report_error("api key last_used_at update failed", error)
 
     return user_id
 
@@ -2308,7 +2351,7 @@ def generate_research_queries(
                 return cleaned[:MAX_RESEARCH_QUERIES]
 
     except Exception as error:  # noqa: BLE001 - best-effort, has a fallback
-        print(f"EASTA: research query generation failed: {error!r}")
+        report_error("research query generation failed", error)
 
     return [topic]
 
@@ -3405,7 +3448,7 @@ def tool_generate_image(
     try:
         log_direct_cost(user_id, conversation_id, IMAGE_MODEL, cost_usd)
     except Exception as error:  # noqa: BLE001 - best-effort
-        print(f"EASTA: image-generation cost logging failed: {error!r}")
+        report_error("image-generation cost logging failed", error)
 
     result_text = (
         f"Generated an image for: \"{prompt}\" ({aspect_ratio}) and "
@@ -4277,7 +4320,7 @@ def maybe_summarize_conversation(conversation_id: int, conversation_row):
             )
 
     except Exception as error:  # noqa: BLE001 - best-effort background task
-        print(f"EASTA: conversation summarization failed: {error!r}")
+        report_error("conversation summarization failed", error)
 
 
 # --- Cross-conversation memory -----------------------------------------
@@ -4344,7 +4387,7 @@ def extract_durable_fact(user_text: str) -> str | None:
         text = (response.choices[0].message.content or "").strip()
 
     except Exception as error:  # noqa: BLE001 - best-effort
-        print(f"EASTA: memory extraction call failed: {error!r}")
+        report_error("memory extraction call failed", error)
         return None
 
     if not text or text.upper() == "NONE":
@@ -4884,10 +4927,10 @@ def build_streaming_response(
                 break
 
             except Exception as error:
-                print(
-                    f"EASTA: model '{model}' failed "
-                    f"(attempt {attempt + 1}/{len(models_to_try)}): "
-                    f"{error!r}"
+                report_error(
+                    f"model '{model}' failed "
+                    f"(attempt {attempt + 1}/{len(models_to_try)})",
+                    error,
                 )
 
                 if sent_any_output:
@@ -4922,14 +4965,14 @@ def build_streaming_response(
                         conversation_id, fresh_conversation
                     )
             except Exception as error:  # noqa: BLE001
-                print(f"EASTA: post-turn summarization skipped: {error!r}")
+                report_error("post-turn summarization skipped", error)
 
             try:
                 maybe_extract_memory(
                     conversation_id, user_id, latest_user_text
                 )
             except Exception as error:  # noqa: BLE001
-                print(f"EASTA: post-turn memory extraction skipped: {error!r}")
+                report_error("post-turn memory extraction skipped", error)
 
     return StreamingResponse(
         generate(),
@@ -6073,7 +6116,7 @@ def regenerate_image(data: RegenerateImageRequest, request: Request):
     try:
         log_direct_cost(user_id, data.conversation_id, IMAGE_MODEL, cost_usd)
     except Exception as error:  # noqa: BLE001 - best-effort
-        print(f"EASTA: image-regeneration cost logging failed: {error!r}")
+        report_error("image-regeneration cost logging failed", error)
 
     return {
         "id": file_id,
@@ -6167,7 +6210,7 @@ async def transcribe(
         try:
             log_direct_cost(user_id, conversation_id, STT_MODEL, cost_usd)
         except Exception as error:  # noqa: BLE001 - best-effort
-            print(f"EASTA: STT cost logging failed: {error!r}")
+            report_error("STT cost logging failed", error)
 
     return {"text": text}
 
@@ -6211,7 +6254,7 @@ def speak(data: SpeakRequest, request: Request):
     try:
         log_direct_cost(user_id, None, TTS_MODEL, cost_usd)
     except Exception as error:  # noqa: BLE001 - best-effort
-        print(f"EASTA: TTS cost logging failed: {error!r}")
+        report_error("TTS cost logging failed", error)
 
     return Response(
         content=audio_bytes,
@@ -7375,14 +7418,15 @@ def run_public_chat_turn(
                             payload.completion_tokens or 0,
                         )
                     except Exception as usage_error:  # noqa: BLE001
-                        print(f"EASTA: usage logging failed: {usage_error!r}")
+                        report_error("usage logging failed", usage_error)
 
             break
 
         except Exception as error:
-            print(
-                f"EASTA: model '{model}' failed (v1 chat, attempt "
-                f"{attempt + 1}/{len(models_to_try)}): {error!r}"
+            report_error(
+                f"model '{model}' failed (v1 chat, attempt "
+                f"{attempt + 1}/{len(models_to_try)})",
+                error,
             )
 
             if sent_any_output:
@@ -7404,12 +7448,12 @@ def run_public_chat_turn(
             if fresh_conversation:
                 maybe_summarize_conversation(conversation_id, fresh_conversation)
         except Exception as error:  # noqa: BLE001
-            print(f"EASTA: post-turn summarization skipped (v1 chat): {error!r}")
+            report_error("post-turn summarization skipped (v1 chat)", error)
 
         try:
             maybe_extract_memory(conversation_id, user_id, latest_user_text)
         except Exception as error:  # noqa: BLE001
-            print(f"EASTA: post-turn memory extraction skipped (v1 chat): {error!r}")
+            report_error("post-turn memory extraction skipped (v1 chat)", error)
 
     return complete_response
 
