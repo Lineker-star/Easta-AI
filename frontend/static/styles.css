@@ -884,6 +884,31 @@ button {
    so highlighting spans the full row width -- including the
    hover-revealed menu button -- not just where the text is.
    position: relative anchors .conversation-menu's dropdown. */
+/* Phase 25: shown in #conversation-list the instant the page loads,
+   before GET /api/conversations has even returned -- without this the
+   sidebar was just blank while "Checking your session..." sat static
+   in the header, which reads as frozen/broken on a slow connection
+   rather than "loading." renderConversationSkeleton()/
+   clearConversationSkeleton() in chat.js toggle it. */
+.conversation-skeleton-row {
+    height: 34px;
+    margin: 4px 8px;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(
+        90deg,
+        var(--color-bg-soft) 25%,
+        var(--color-border) 50%,
+        var(--color-bg-soft) 75%
+    );
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 .conversation-row {
     position: relative;
     display: flex;

@@ -1112,6 +1112,67 @@ production traffic. Pick these up in Cursor:
     exercised in a real browser (no headless browser available in
     this environment) — only the IndexedDB layer and the page
     rendering were checked directly.
+- **Graceful degradation on slow connections (Phase 25)** — an audit-
+  then-fix pass, purely client-side (no backend/schema change). The
+  audit found two real gaps: nothing anywhere in the app ever timed
+  out a request (a genuinely hung — not offline, not erroring, just
+  never-resolving — connection left whatever button triggered it
+  disabled forever with no recourse but a reload), and the chat
+  sidebar's conversation list rendered as a bare blank space for
+  however long `GET /api/conversations` took, with the only visible
+  "loading" hint being a single static "Checking your session..."
+  line in the header — reading as frozen/broken rather than loading
+  on a slow connection.
+  - Every page's `apiRequest()` (`account.js`, `admin.js`,
+    `documents.js`, `transcriptions.js`, `usage.js`) plus the raw
+    `fetch()` calls in `login.js`/`register.js`/`join.js`/`shared.js`
+    now wrap the request in an `AbortController` with a bounded
+    timeout, turning a bare `AbortError` into a clear "Request timed
+    out — check your connection and try again." message that surfaces
+    through each page's existing `catch (error) { ...textContent =
+    error.message }` — no call site needed to change to benefit.
+    `chat.js`'s `apiRequest()` is the one deliberate exception: it
+    also carries the message-send/edit/regenerate streaming requests
+    (which can legitimately run long — research mode reading several
+    pages, a long generation — and must never be aborted just for
+    taking a while), so its timeout is opt-in per call rather than a
+    blanket default. Only the genuinely-quick calls that run during
+    initial page load (`loadSession()`, `loadConversations()`,
+    `loadMessages()`, all 15s) opt in — exactly the ones responsible
+    for "everything looks stuck" on a bad connection.
+  - The bulk-audio-upload call in `transcriptions.js` gets its own
+    much longer timeout (5 minutes, via a named `UPLOAD_TIMEOUT_MS`
+    rather than the 20s default) — a large file legitimately takes a
+    while on a slow connection, and the point of this phase is
+    tolerating that gracefully, not aborting it.
+  - `login.js`/`register.js`/`join.js` submit buttons now show a
+    loading label ("Logging in…"/"Creating account…"/"Joining…")
+    while their request is in flight — they already disabled the
+    button, but with no visible text change it read as unresponsive
+    rather than working, unlike every other form in the app (Save/
+    Generate/Create buttons elsewhere already did this).
+  - New `renderConversationSkeleton()` in `chat.js`: five shimmering
+    placeholder rows shown in `#conversation-list` the instant
+    `bootstrap()` starts, before `loadSession()`/`loadConversations()`
+    even return — `renderConversations()` already clears the list's
+    contents before drawing real rows, so the skeleton is naturally
+    replaced with no extra "clear" call needed on the success path;
+    `showPageError()` now also explicitly clears it on the failure
+    path (e.g. a `loadSession()` timeout) so it can't shimmer forever
+    if page load fails outright.
+  - Verified: the exact `AbortController` + timeout-wrapper logic
+    (not just syntax) was exercised against a simulated never-resolving
+    `fetch()` under Node — confirmed it aborts at the configured
+    timeout and rejects with the friendly message, not the raw
+    `AbortError`. `node -c` passes on every changed JS file, CSS brace
+    balance holds, and every affected page (`/chat`, `/login`,
+    `/register`, `/join/<token>`, `/shared/<token>`, `/account`,
+    `/usage`, `/documents`, `/admin`, `/transcriptions`) still renders
+    via a local Flask dev server.
+    ⚠️ **Not verified**: real browser behavior on an actually slow or
+    intermittently-stalling connection (no way to simulate real network
+    throttling in this environment) — only the timeout logic itself
+    and page rendering were checked directly.
 
 ## Run locally
 

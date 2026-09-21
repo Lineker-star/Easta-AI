@@ -1,15 +1,41 @@
-function apiRequest(path, options = {}) {
+// Phase 25: see account.js's identical apiRequest() for the full
+// reasoning -- a bounded wait with a friendly timeout message instead
+// of a request (and whatever button triggered it) hanging forever.
+// Default is shorter than the bulk-upload call below explicitly asks
+// for (see UPLOAD_TIMEOUT_MS) -- audio files can legitimately take a
+// while to upload on a slow connection, and a 20s cap would abort a
+// real-but-slow upload instead of gracefully tolerating it.
+function apiRequest(path, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     return fetch(
         `${window.BACKEND_URL}${path}`,
         {
             ...options,
             credentials: "include",
+            signal: controller.signal,
             headers: {
                 ...options.headers
             }
         }
-    );
+    )
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
 }
+
+
+// Bulk audio uploads can be large and slow to transmit -- deliberately
+// much longer than the default so a genuinely slow (not hung) upload
+// isn't mistaken for one that will never finish.
+const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 
 async function readJsonResponse(response) {
@@ -132,10 +158,14 @@ uploadForm.addEventListener("submit", async (event) => {
         const formData = new FormData();
         Array.from(files).forEach((file) => formData.append("files", file));
 
-        const response = await apiRequest("/api/transcription-jobs", {
-            method: "POST",
-            body: formData
-        });
+        const response = await apiRequest(
+            "/api/transcription-jobs",
+            {
+                method: "POST",
+                body: formData
+            },
+            UPLOAD_TIMEOUT_MS
+        );
 
         const data = await readJsonResponse(response);
 

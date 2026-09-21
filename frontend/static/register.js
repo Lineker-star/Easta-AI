@@ -19,6 +19,24 @@ const googleSigninButton = document.getElementById("google-signin-button");
 const nextPath = registerForm.dataset.next || "/chat";
 
 
+// Phase 25: see login.js's identical helper.
+function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    return fetch(url, { ...options, signal: controller.signal })
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
+}
+
+
 // Same hide-rather-than-show-broken pattern as the mic button /
 // Research toggle: only reveal "Continue with Google" once the
 // backend confirms it's actually configured.
@@ -66,9 +84,11 @@ registerForm.addEventListener(
         }
 
         registerButton.disabled = true;
+        const originalLabel = registerButton.textContent;
+        registerButton.textContent = "Creating account…";
 
         try {
-            const response = await fetch(
+            const response = await fetchWithTimeout(
                 `${window.BACKEND_URL}/api/register`,
                 {
                     method: "POST",
@@ -100,6 +120,7 @@ registerForm.addEventListener(
 
         } finally {
             registerButton.disabled = false;
+            registerButton.textContent = originalLabel;
         }
     }
 );

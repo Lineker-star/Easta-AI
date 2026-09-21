@@ -1,14 +1,35 @@
-function apiRequest(path, options = {}) {
+// Phase 25: every call gets a bounded wait by default -- on a genuinely
+// hung connection (not offline, not a clean error, just never
+// resolving) every request here used to leave whatever button
+// triggered it disabled forever with no recourse but a reload. A
+// timed-out request now rejects with a clear, friendly message instead
+// of an AbortError's cryptic default text, so it surfaces through the
+// exact same `catch (error) { ...textContent = error.message }` every
+// call site here already has -- no call site needed to change.
+function apiRequest(path, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     return fetch(
         `${window.BACKEND_URL}${path}`,
         {
             ...options,
             credentials: "include",
+            signal: controller.signal,
             headers: {
                 ...options.headers
             }
         }
-    );
+    )
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
 }
 
 

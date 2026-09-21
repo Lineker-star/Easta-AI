@@ -13,6 +13,27 @@ const googleSigninButton = document.getElementById("google-signin-button");
 const nextPath = loginForm.dataset.next || "/chat";
 
 
+// Phase 25: same bounded-wait-with-a-friendly-message pattern as the
+// apiRequest() helpers elsewhere (account.js, chat.js, ...) -- this
+// page has no shared apiRequest of its own, so it's inlined here at
+// the one place that needs it.
+function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    return fetch(url, { ...options, signal: controller.signal })
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
+}
+
+
 // A failed Google sign-in redirects back here with ?error=... (see
 // GET /api/auth/google/callback in backend/app.py) -- there's no JSON
 // response to read on a full-page redirect, so the message travels as
@@ -42,6 +63,8 @@ loginForm.addEventListener("submit", async (event) => {
 
     loginError.textContent = "";
     loginButton.disabled = true;
+    const originalLabel = loginButton.textContent;
+    loginButton.textContent = "Logging in…";
 
     const username = document
         .getElementById("username")
@@ -53,7 +76,7 @@ loginForm.addEventListener("submit", async (event) => {
         .value;
 
     try {
-        const response = await fetch(
+        const response = await fetchWithTimeout(
             `${window.BACKEND_URL}/api/login`,
             {
                 method: "POST",
@@ -83,5 +106,6 @@ loginForm.addEventListener("submit", async (event) => {
 
     } finally {
         loginButton.disabled = false;
+        loginButton.textContent = originalLabel;
     }
 });

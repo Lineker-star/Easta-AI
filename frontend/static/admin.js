@@ -1,14 +1,30 @@
-function apiRequest(path, options = {}) {
+// Phase 25: see account.js's identical apiRequest() for the full
+// reasoning -- a bounded wait with a friendly timeout message instead
+// of a request (and whatever button triggered it) hanging forever.
+function apiRequest(path, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     return fetch(
         `${window.BACKEND_URL}${path}`,
         {
             ...options,
             credentials: "include",
+            signal: controller.signal,
             headers: {
                 ...options.headers
             }
         }
-    );
+    )
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
 }
 
 

@@ -77,12 +77,30 @@ function buildMessageRow(message) {
 }
 
 
+// Phase 25: see login.js's identical helper.
+function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    return fetch(url, { ...options, signal: controller.signal })
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
+}
+
+
 async function loadSharedConversation() {
     const titleEl = document.getElementById("shared-title");
     const container = document.getElementById("shared-messages");
 
     try {
-        const response = await fetch(
+        const response = await fetchWithTimeout(
             `${window.BACKEND_URL}/api/shared/${window.SHARE_TOKEN}`
         );
 

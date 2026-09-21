@@ -4,13 +4,33 @@ const joinError = document.getElementById("join-error");
 const joinSuccess = document.getElementById("join-success");
 
 
+// Phase 25: see login.js's identical helper.
+function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    return fetch(url, { ...options, signal: controller.signal })
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
+}
+
+
 joinButton.addEventListener("click", async () => {
     joinError.textContent = "";
     joinSuccess.textContent = "";
     joinButton.disabled = true;
+    const originalLabel = joinButton.textContent;
+    joinButton.textContent = "Joining…";
 
     try {
-        const response = await fetch(
+        const response = await fetchWithTimeout(
             `${window.BACKEND_URL}/api/organizations/join/${encodeURIComponent(window.INVITE_TOKEN)}`,
             {
                 method: "POST",
@@ -45,5 +65,6 @@ joinButton.addEventListener("click", async () => {
     } catch (error) {
         joinError.textContent = error.message;
         joinButton.disabled = false;
+        joinButton.textContent = originalLabel;
     }
 });

@@ -244,17 +244,51 @@ input.addEventListener("keydown", (event) => {
 input.addEventListener("input", resizeMessageInput);
 
 
-function apiRequest(path, options = {}) {
+// Phase 25: timeoutMs is opt-in and off by default here (unlike the
+// other pages' apiRequest()) -- this one also carries the message-
+// send/edit/regenerate streaming requests via streamAssistantReply(),
+// which can legitimately run for a long time (research mode reading
+// several pages, a long generation) and must never be aborted just
+// for taking a while. Only the handful of call sites that are
+// genuinely quick (loadSession/loadConversations/loadMessages) pass
+// an explicit timeout below.
+function apiRequest(path, options = {}, timeoutMs = null) {
+    if (!timeoutMs) {
+        return fetch(
+            `${window.BACKEND_URL}${path}`,
+            {
+                ...options,
+                credentials: "include",
+                headers: {
+                    ...options.headers
+                }
+            }
+        );
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     return fetch(
         `${window.BACKEND_URL}${path}`,
         {
             ...options,
             credentials: "include",
+            signal: controller.signal,
             headers: {
                 ...options.headers
             }
         }
-    );
+    )
+        .catch((error) => {
+            if (error.name === "AbortError") {
+                throw new Error(
+                    "Request timed out — check your connection and try again."
+                );
+            }
+            throw error;
+        })
+        .finally(() => clearTimeout(timeoutId));
 }
 
 
@@ -908,6 +942,13 @@ function showPageError(message) {
 
     row.appendChild(error);
     messagesContainer.appendChild(row);
+
+    // Don't leave the sidebar skeleton shimmering forever if
+    // initializeChat() failed (e.g. a timeout) before it ever got to
+    // renderConversations().
+    if (conversationList.querySelector(".conversation-skeleton-row")) {
+        conversationList.innerHTML = "";
+    }
 }
 
 
@@ -935,6 +976,24 @@ function renderMessages(messages) {
     });
 
     scrollToBottom();
+}
+
+
+// Phase 25: a handful of shimmering placeholder rows shown the instant
+// the page loads, before the real GET /api/conversations response
+// (or even loadSession()) comes back -- see the .conversation-skeleton-row
+// CSS comment for why this matters on a slow connection specifically.
+// renderConversations() above always clears #conversation-list's
+// innerHTML before drawing real rows, so this never needs an explicit
+// "clear" call -- it's just naturally replaced.
+function renderConversationSkeleton() {
+    conversationList.innerHTML = "";
+
+    for (let i = 0; i < 5; i++) {
+        const row = document.createElement("div");
+        row.className = "conversation-skeleton-row";
+        conversationList.appendChild(row);
+    }
 }
 
 
@@ -2534,7 +2593,7 @@ async function regenerateLastReply() {
 /* --- conversation loading -------------------------------------------------- */
 
 async function loadSession() {
-    const response = await apiRequest("/api/session");
+    const response = await apiRequest("/api/session", {}, 15000);
     const data = await readJsonResponse(response);
 
     if (!data.logged_in) {
@@ -2574,7 +2633,7 @@ async function loadFeatures() {
 
 
 async function loadConversations() {
-    const response = await apiRequest("/api/conversations");
+    const response = await apiRequest("/api/conversations", {}, 15000);
     const data = await readJsonResponse(response);
     return data.conversations;
 }
@@ -2591,7 +2650,9 @@ async function createConversation() {
 
 async function loadMessages(conversationId) {
     const response = await apiRequest(
-        `/api/conversations/${conversationId}/messages`
+        `/api/conversations/${conversationId}/messages`,
+        {},
+        15000
     );
     const data = await readJsonResponse(response);
     return data.messages;
@@ -2833,6 +2894,8 @@ window.addEventListener("popstate", async () => {
 
 
 async function bootstrap() {
+    renderConversationSkeleton();
+
     languageSelect.value = languagePreference;
 
     await loadTranslations(languagePreference);
