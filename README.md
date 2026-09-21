@@ -1227,6 +1227,47 @@ production traffic. Pick these up in Cursor:
     ingest endpoint, neither available in this environment) — only the
     SDK's own local behavior (client activation, safe no-op, correct
     config) was checked directly.
+- **Multi-provider image generation + resilience (Phase 28)** —
+  `generate_image_bytes()` now tries a cross-provider fallback model if
+  the primary one errors or rate-limits, the same resilience pattern
+  already applied to chat (`FAST_MODEL`/`SMART_MODEL`/`FALLBACK_MODEL`)
+  and vision (`VISION_MODEL`/`VISION_FALLBACK_MODEL`) — image
+  generation was the one remaining OpenRouter-backed feature with no
+  fallback at all, a single point of failure if `EASTA_IMAGE_MODEL`'s
+  provider had an outage.
+  - New `EASTA_IMAGE_FALLBACK_MODEL` (default `openai/gpt-image-1`) —
+    deliberately a different underlying provider than the default
+    `EASTA_IMAGE_MODEL` (`google/gemini-2.5-flash-image`), so one
+    provider's outage doesn't take the feature down entirely.
+  - `generate_image_bytes()`'s return type grew a 4th field,
+    `model_used` — whichever model in the chain actually produced the
+    image, appended at the end (not inserted in the middle, learning
+    from the Phase 23 `is_admin`-tuple lesson) so both call sites
+    needed a small, explicit update rather than silently breaking.
+    Both (the `generate_image` tool and `POST /api/regenerate-image`)
+    now log cost against `model_used` instead of always
+    `EASTA_IMAGE_MODEL`, so a usage/cost breakdown correctly reflects
+    the fallback provider taking over rather than attributing spend to
+    a model that never actually responded.
+  - Every failed attempt (primary or fallback) goes through
+    `report_error()` from Phase 26, so a provider starting to fail
+    shows up in Sentry (when configured) even on turns where the
+    fallback quietly saves the day and the user never sees an error at
+    all.
+  - Verified against a mocked OpenRouter Image API covering all three
+    paths: primary fails → fallback succeeds (confirmed `model_used`
+    is the fallback, cost logged correctly, exactly one `report_error`
+    call for the failed primary); both fail → the last error is
+    re-raised (confirmed two `report_error` calls, one per model) so
+    callers' existing "turn this into a user-facing tool error /
+    502" handling is unchanged; primary succeeds → the fallback is
+    never even attempted (confirmed exactly one HTTP call made, not
+    two) so the common case doesn't pay for a redundant request.
+    `py_compile` passes.
+    ⚠️ **Not verified**: a real call against OpenRouter's live Image
+    API for either model (no network access to OpenRouter in this
+    environment) — only the fallback/logging logic itself was checked,
+    against a mocked HTTP layer.
 
 ## Run locally
 

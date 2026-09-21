@@ -175,6 +175,14 @@ VISION_FALLBACK_MODEL = os.getenv(
 # OpenRouter's live catalog and docs; re-verify at
 # https://openrouter.ai/models if you change it.
 IMAGE_MODEL = os.getenv("EASTA_IMAGE_MODEL", "google/gemini-2.5-flash-image")
+# Phase 28: cross-provider fallback if IMAGE_MODEL errors or rate-limits
+# -- same resilience pattern already applied to chat
+# (FAST/SMART/FALLBACK_MODEL) and vision
+# (VISION_MODEL/VISION_FALLBACK_MODEL). Deliberately a different
+# underlying provider (OpenAI, not Google) so a single provider's
+# outage doesn't take down image generation entirely -- re-verify
+# against https://openrouter.ai/models before changing either model.
+IMAGE_FALLBACK_MODEL = os.getenv("EASTA_IMAGE_FALLBACK_MODEL", "openai/gpt-image-1")
 
 # Voice: server-side fallbacks for when the browser's native
 # SpeechRecognition / speechSynthesis APIs aren't available (see
@@ -3032,50 +3040,72 @@ IMAGE_ASPECT_RATIOS = {
 
 def generate_image_bytes(
     prompt: str, aspect_ratio: str | None = None
-) -> tuple[bytes, str, float]:
+) -> tuple[bytes, str, float, str]:
     """Calls OpenRouter's dedicated Image API (POST /api/v1/images --
     distinct from the chat completions endpoint used everywhere else in
-    this file). Returns (image_bytes, mime_type, cost_usd). Raises on
-    failure; callers turn that into a user-facing tool error message."""
-    request_body = {"model": IMAGE_MODEL, "prompt": prompt}
+    this file). Tries IMAGE_MODEL first, then IMAGE_FALLBACK_MODEL (a
+    different underlying provider) if the first errors or rate-limits
+    -- same resilience already applied to chat and vision model
+    selection elsewhere in this file. Returns (image_bytes, mime_type,
+    cost_usd, model_used) -- model_used is whichever model actually
+    produced the image, so callers log real usage against it rather
+    than always crediting/blaming IMAGE_MODEL even when the fallback
+    had to take over. Raises the last attempt's error only if every
+    model in the chain failed."""
+    models_to_try = [IMAGE_MODEL]
+    if IMAGE_FALLBACK_MODEL and IMAGE_FALLBACK_MODEL != IMAGE_MODEL:
+        models_to_try.append(IMAGE_FALLBACK_MODEL)
 
-    ratio_value = IMAGE_ASPECT_RATIOS.get(aspect_ratio)
-    if ratio_value:
-        request_body["aspect_ratio"] = ratio_value
+    last_error: Exception | None = None
 
-    response = requests.post(
-        "https://openrouter.ai/api/v1/images",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=request_body,
-        timeout=90,
-    )
-    response.raise_for_status()
+    for model in models_to_try:
+        request_body = {"model": model, "prompt": prompt}
 
-    payload = response.json()
-    images = payload.get("data") or []
+        ratio_value = IMAGE_ASPECT_RATIOS.get(aspect_ratio)
+        if ratio_value:
+            request_body["aspect_ratio"] = ratio_value
 
-    if not images:
-        raise RuntimeError("The image model returned no image.")
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/images",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=request_body,
+                timeout=90,
+            )
+            response.raise_for_status()
 
-    first = images[0]
-    image_bytes = base64.b64decode(first["b64_json"])
-    mime_type = first.get("media_type", "image/png")
-    cost_usd = float((payload.get("usage") or {}).get("cost", 0) or 0)
+            payload = response.json()
+            images = payload.get("data") or []
 
-    if not cost_usd:
-        # The dedicated Image API normally reports a real per-call
-        # cost in usage.cost (confirmed against the live endpoint) --
-        # this is a rough fallback estimate only, so a usage_logs row
-        # still gets a non-zero, non-token-based cost if that field is
-        # ever missing. Reconcile against your OpenRouter invoice.
-        cost_usd = IMAGE_GENERATION_FALLBACK_COST_USD.get(
-            IMAGE_MODEL, DEFAULT_IMAGE_GENERATION_FALLBACK_COST_USD
-        )
+            if not images:
+                raise RuntimeError("The image model returned no image.")
 
-    return image_bytes, mime_type, cost_usd
+            first = images[0]
+            image_bytes = base64.b64decode(first["b64_json"])
+            mime_type = first.get("media_type", "image/png")
+            cost_usd = float((payload.get("usage") or {}).get("cost", 0) or 0)
+
+            if not cost_usd:
+                # The dedicated Image API normally reports a real
+                # per-call cost in usage.cost (confirmed against the
+                # live endpoint) -- this is a rough fallback estimate
+                # only, so a usage_logs row still gets a non-zero,
+                # non-token-based cost if that field is ever missing.
+                # Reconcile against your OpenRouter invoice.
+                cost_usd = IMAGE_GENERATION_FALLBACK_COST_USD.get(
+                    model, DEFAULT_IMAGE_GENERATION_FALLBACK_COST_USD
+                )
+
+            return image_bytes, mime_type, cost_usd, model
+
+        except Exception as error:  # noqa: BLE001 - falls through to the next model, or re-raised below
+            last_error = error
+            report_error(f"image generation via '{model}' failed", error)
+
+    raise last_error
 
 
 def log_direct_cost(
@@ -3435,7 +3465,9 @@ def tool_generate_image(
     if aspect_ratio not in IMAGE_ASPECT_RATIOS:
         aspect_ratio = "square"
 
-    image_bytes, mime_type, cost_usd = generate_image_bytes(prompt, aspect_ratio)
+    image_bytes, mime_type, cost_usd, model_used = generate_image_bytes(
+        prompt, aspect_ratio
+    )
 
     title = prompt[:150]
     file_id = save_generated_file(
@@ -3444,9 +3476,12 @@ def tool_generate_image(
 
     # Always logged, even if generate_image_bytes() had to fall back to
     # an estimated cost -- every generation call should show up in
-    # /usage, not just the ones with a nonzero real cost.
+    # /usage, not just the ones with a nonzero real cost. Logged
+    # against model_used (not always IMAGE_MODEL), so a spend/usage
+    # breakdown reflects the fallback provider actually taking over,
+    # not a phantom charge attributed to a model that never responded.
     try:
-        log_direct_cost(user_id, conversation_id, IMAGE_MODEL, cost_usd)
+        log_direct_cost(user_id, conversation_id, model_used, cost_usd)
     except Exception as error:  # noqa: BLE001 - best-effort
         report_error("image-generation cost logging failed", error)
 
@@ -6102,7 +6137,9 @@ def regenerate_image(data: RegenerateImageRequest, request: Request):
     aspect_ratio = data.aspect_ratio if data.aspect_ratio in IMAGE_ASPECT_RATIOS else "square"
 
     try:
-        image_bytes, mime_type, cost_usd = generate_image_bytes(prompt, aspect_ratio)
+        image_bytes, mime_type, cost_usd, model_used = generate_image_bytes(
+            prompt, aspect_ratio
+        )
     except Exception as error:
         raise HTTPException(
             status_code=502,
@@ -6114,7 +6151,7 @@ def regenerate_image(data: RegenerateImageRequest, request: Request):
     )
 
     try:
-        log_direct_cost(user_id, data.conversation_id, IMAGE_MODEL, cost_usd)
+        log_direct_cost(user_id, data.conversation_id, model_used, cost_usd)
     except Exception as error:  # noqa: BLE001 - best-effort
         report_error("image-regeneration cost logging failed", error)
 
