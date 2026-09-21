@@ -224,6 +224,10 @@
 
             <footer class="chat-composer">
 
+                <div id="offline-banner" class="offline-banner" hidden data-i18n="offline_banner">
+                    ⚡ You're offline — messages you send now will be queued and sent automatically once you're back online.
+                </div>
+
                 <form class="message-form" id="message-form">
 
                     <div
@@ -390,6 +394,7 @@
     </script>
 
     <script src="{{ url_for('static', filename='i18n.js') }}"></script>
+    <script src="{{ url_for('static', filename='offline-queue.js') }}"></script>
     <script src="{{ url_for('static', filename='chat.js') }}"></script>
     <script src="{{ url_for('static', filename='pwa.js') }}"></script>
 

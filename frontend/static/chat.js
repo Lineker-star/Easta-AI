@@ -6,6 +6,7 @@ const conversationSearchInput = document.getElementById("conversation-search-inp
 const messageForm = document.getElementById("message-form");
 const input = document.getElementById("message");
 const sendButton = document.getElementById("send-button");
+const offlineBanner = document.getElementById("offline-banner");
 const messagesContainer = document.getElementById("chat-messages");
 const currentUser = document.getElementById("current-user");
 const logoutButton = document.getElementById("logout-button");
@@ -36,6 +37,13 @@ const themeToggleLabel = document.getElementById("theme-toggle-label");
 let activeConversationId = window.INITIAL_CONVERSATION_ID;
 let currentCanvas = null;
 let pendingAttachments = [];
+
+// Phase 24 offline queue: maps a queued message's IndexedDB id to the
+// { row, group, bubble } already rendered for it (either just-created
+// while composing offline, or re-rendered from storage on page load),
+// so flushOfflineQueue() reuses the existing bubble instead of
+// duplicating it once the connection comes back.
+const queuedMessageRows = new Map();
 
 /* Feature flags from the backend (see GET /api/features) — used to hide
  * controls that would otherwise error with nothing configured, per the
@@ -768,6 +776,32 @@ function createUserMessage(content, messageId, imageDataUrls = []) {
     messagesContainer.appendChild(row);
 
     return { row, group, bubble };
+}
+
+
+// Phase 24 offline queue: a small "⏳ Queued — will send once you're
+// back online" badge under a just-composed message, added instead of
+// the usual assistant reply when the send fails offline. Idempotent
+// (safe to call again on the same row) so flushOfflineQueue() can
+// clear it without tracking whether it was ever added.
+function markMessageRowQueued(userMessage) {
+    let badge = userMessage.group.querySelector(".message-queued-badge");
+
+    if (!badge) {
+        badge = document.createElement("div");
+        badge.className = "message-queued-badge";
+        userMessage.group.appendChild(badge);
+    }
+
+    badge.textContent = "⏳ Queued — will send once you're back online";
+}
+
+
+function unmarkMessageRowQueued(userMessage) {
+    const badge = userMessage.group.querySelector(".message-queued-badge");
+    if (badge) {
+        badge.remove();
+    }
 }
 
 
@@ -2159,11 +2193,11 @@ async function consumeStreamResponse(response, { onMeta, onToken }) {
 }
 
 
-async function streamAssistantReply(fetchResponsePromise) {
+async function streamAssistantReply(fetchResponsePromise, offlineQueue = null) {
     removeEmptyState();
 
     const assistantMessage = createStreamingAssistantMessage();
-    const { bubble, status, contentArea } = assistantMessage;
+    const { row, bubble, status, contentArea } = assistantMessage;
 
     let contentSoFar = "";
     let firstChunk = true;
@@ -2241,8 +2275,54 @@ async function streamAssistantReply(fetchResponsePromise) {
             status.remove();
         }
 
+        // This send succeeded -- if it was a flush replay of an
+        // already-queued item (queuedId set), clear it from
+        // IndexedDB now. A fresh (never-queued) send has no queuedId
+        // and nothing to clear.
+        if (offlineQueue && offlineQueue.queuedId) {
+            try {
+                await removeQueuedMessage(offlineQueue.queuedId);
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
     } catch (error) {
         console.error(error);
+
+        // fetch() itself only ever rejects with a TypeError for a
+        // genuine network-level failure (offline, DNS, connection
+        // reset) -- an HTTP error response (4xx/5xx) instead resolves
+        // normally and is turned into a regular Error by
+        // consumeStreamResponse() above. That distinction is what
+        // lets a real backend error still show as an error while a
+        // "you're offline" failure gets queued instead.
+        if (offlineQueue && error instanceof TypeError) {
+            row.remove();
+
+            if (offlineQueue.queuedId) {
+                // Already in IndexedDB from an earlier attempt (this
+                // call is flushOfflineQueue() retrying it) -- still
+                // offline, so just leave it there and re-show the
+                // badge rather than inserting a duplicate row.
+                markMessageRowQueued(offlineQueue.userRow);
+                return;
+            }
+
+            try {
+                const newId = await addQueuedMessage(offlineQueue.data);
+                queuedMessageRows.set(newId, offlineQueue.userRow);
+                markMessageRowQueued(offlineQueue.userRow);
+            } catch (queueError) {
+                console.error(queueError);
+                // IndexedDB itself unavailable -- fall back to the
+                // ordinary error path below rather than silently
+                // losing the message with no feedback at all.
+                offlineQueue.userRow.row.classList.add("message-row-failed");
+            }
+
+            return;
+        }
 
         if (status.isConnected) {
             status.remove();
@@ -2264,6 +2344,95 @@ async function streamAssistantReply(fetchResponsePromise) {
         await refreshConversationView();
     } catch (error) {
         console.error(error);
+    }
+}
+
+
+/* --- offline composing (Phase 24) ------------------------------------------
+ * A message typed while offline gets queued to IndexedDB (see
+ * offline-queue.js) instead of just failing -- see streamAssistantReply()'s
+ * offlineQueue parameter above for where a message actually gets added to
+ * the queue. The functions below are the other half: showing a still-
+ * queued message after a page reload, and sending everything queued once
+ * the connection comes back. */
+
+// Queued messages persist across reloads, but the DOM row they were
+// created against doesn't -- this re-renders one from its stored
+// displayText/displayImages so a reload doesn't make a pending offline
+// message disappear.
+function renderQueuedMessagesForConversation(conversationId, items) {
+    for (const item of items) {
+        const userMessage = createUserMessage(
+            item.displayText,
+            null,
+            item.displayImages || []
+        );
+        markMessageRowQueued(userMessage);
+        queuedMessageRows.set(item.id, userMessage);
+    }
+}
+
+
+// Called after rendering a conversation's real (server-side) history --
+// appends anything still queued for it from a previous offline session
+// so a reload doesn't silently drop a pending message.
+async function loadAndRenderQueuedMessages(conversationId) {
+    queuedMessageRows.clear();
+
+    try {
+        const queued = await getQueuedMessages(conversationId);
+        queued.sort((a, b) => a.id - b.id);
+        renderQueuedMessagesForConversation(conversationId, queued);
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+
+async function flushOfflineQueue() {
+    if (!navigator.onLine || !activeConversationId) {
+        return;
+    }
+
+    let queued;
+    try {
+        queued = await getQueuedMessages(activeConversationId);
+    } catch (error) {
+        console.error(error);
+        return;
+    }
+
+    // IndexedDB's getAll() already returns primary-key (insertion)
+    // order for an auto-incrementing keyPath, but sort explicitly
+    // rather than depend on that -- queued messages must send in the
+    // order they were composed.
+    queued.sort((a, b) => a.id - b.id);
+
+    for (const item of queued) {
+        if (!navigator.onLine) {
+            // Went offline again mid-flush -- stop here. Everything
+            // from this item onward stays in IndexedDB for next time.
+            break;
+        }
+
+        const userMessage = queuedMessageRows.get(item.id) || createUserMessage(
+            item.displayText,
+            null,
+            item.displayImages || []
+        );
+        queuedMessageRows.delete(item.id);
+
+        await streamAssistantReply(
+            apiRequest(
+                `/api/conversations/${item.conversationId}/messages`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(item.requestBody)
+                }
+            ),
+            { userRow: userMessage, queuedId: item.id }
+        );
     }
 }
 
@@ -2449,11 +2618,13 @@ async function openConversation(conversationId, updateBrowserHistory = false) {
 
     const conversationMessages = await loadMessages(conversationId);
     renderMessages(conversationMessages);
+    await loadAndRenderQueuedMessages(conversationId);
 
     const conversations = await loadConversations();
     renderConversations(conversations);
 
     await loadCanvas(conversationId);
+    await flushOfflineQueue();
 }
 
 
@@ -2487,14 +2658,32 @@ async function initializeChat() {
 
         const conversationMessages = await loadMessages(activeConversationId);
         renderMessages(conversationMessages);
+        await loadAndRenderQueuedMessages(activeConversationId);
 
         await loadCanvas(activeConversationId);
+        await flushOfflineQueue();
 
     } catch (error) {
         console.error(error);
         showPageError(error.message);
     }
 }
+
+
+function updateOfflineBanner() {
+    offlineBanner.hidden = navigator.onLine;
+}
+
+
+// Auto-send anything still queued the moment the browser tells us the
+// connection is back -- the user shouldn't have to reload or resend
+// by hand.
+window.addEventListener("online", () => {
+    updateOfflineBanner();
+    flushOfflineQueue().catch((error) => console.error(error));
+});
+
+window.addEventListener("offline", updateOfflineBanner);
 
 
 newChatForm.addEventListener("submit", async (event) => {
@@ -2529,7 +2718,7 @@ messageForm.addEventListener("submit", async (event) => {
     const outgoingImages = buildOutgoingImages(pendingAttachments);
     const outgoingMessage = buildOutgoingMessage(userText, pendingAttachments);
 
-    createUserMessage(
+    const userMessage = createUserMessage(
         userText,
         null,
         outgoingImages.map((image) => image.data_url)
@@ -2541,21 +2730,50 @@ messageForm.addEventListener("submit", async (event) => {
     resizeMessageInput();
     scrollToBottom();
 
+    const requestBody = {
+        message: outgoingMessage,
+        language: languagePreference,
+        images: outgoingImages,
+        research: researchMode,
+        image_aspect_ratio: imageAspectRatio
+    };
+
+    // Phase 24: composing while offline. queuePayload carries
+    // everything flushOfflineQueue() needs to actually send this
+    // later, plus the already-rendered image data URLs so a page
+    // reload can redraw the same bubble from IndexedDB alone (no
+    // server round trip needed just to show a still-queued message).
+    const queuePayload = {
+        conversationId: activeConversationId,
+        requestBody,
+        displayText: userText,
+        displayImages: outgoingImages.map((image) => image.data_url)
+    };
+
+    if (!navigator.onLine) {
+        // Known offline already -- skip the doomed network attempt
+        // and its wait entirely, straight to queuing.
+        try {
+            const newId = await addQueuedMessage(queuePayload);
+            queuedMessageRows.set(newId, userMessage);
+            markMessageRowQueued(userMessage);
+        } catch (error) {
+            console.error(error);
+            userMessage.row.classList.add("message-row-failed");
+        }
+        return;
+    }
+
     await streamAssistantReply(
         apiRequest(
             `/api/conversations/${activeConversationId}/messages`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    message: outgoingMessage,
-                    language: languagePreference,
-                    images: outgoingImages,
-                    research: researchMode,
-                    image_aspect_ratio: imageAspectRatio
-                })
+                body: JSON.stringify(requestBody)
             }
-        )
+        ),
+        { data: queuePayload, userRow: userMessage }
     );
 });
 
@@ -2627,6 +2845,7 @@ async function bootstrap() {
     updateMicButtonVisibility();
 
     resizeMessageInput();
+    updateOfflineBanner();
     await initializeChat();
 }
 

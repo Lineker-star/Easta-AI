@@ -6,6 +6,7 @@
     "account_link": "⚙️ Compte",
     "knowledge_base_link": "📚 Base de connaissances",
     "admin_link": "🛡️ Administration",
+    "offline_banner": "⚡ Vous êtes hors ligne — les messages envoyés maintenant seront mis en file d'attente et envoyés automatiquement dès que vous serez de nouveau en ligne.",
     "transcriptions_link": "🎙️ Transcription en masse",
     "install_app_link": "⬇️ Installer l'application",
     "log_out": "Déconnexion",

@@ -6,6 +6,7 @@
     "account_link": "⚙️ Account",
     "knowledge_base_link": "📚 Knowledge base",
     "admin_link": "🛡️ Admin",
+    "offline_banner": "⚡ You're offline — messages you send now will be queued and sent automatically once you're back online.",
     "transcriptions_link": "🎙️ Bulk transcription",
     "install_app_link": "⬇️ Install app",
     "log_out": "Log out",

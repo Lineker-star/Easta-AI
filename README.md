@@ -1053,6 +1053,65 @@ production traffic. Pick these up in Cursor:
     real Postgres migration was run (same caveat as every phase above
     — apply the new `ALTER TABLE` by hand against any existing
     database).
+- **Offline composing (Phase 24)** — a message sent while offline (or
+  while a connection drops mid-send) is queued to IndexedDB instead of
+  just failing, and sent automatically once the connection is back.
+  Purely client-side; no backend or schema change was needed since it
+  replays the exact same `POST /api/conversations/{id}/messages` body
+  the app always sent.
+  - New `frontend/static/offline-queue.js`: a small hand-rolled
+    IndexedDB wrapper (one object store, one shape — not worth a
+    library dependency for) with `addQueuedMessage()`/
+    `getQueuedMessages()`/`removeQueuedMessage()`.
+  - In `chat.js`, the send handler checks `navigator.onLine` up front
+    (skips the doomed network attempt entirely when already known
+    offline) and `streamAssistantReply()` now also catches a
+    network-level failure mid-send and queues instead of showing a
+    hard error — distinguished from a real backend error by `fetch()`
+    only ever rejecting with a `TypeError` for a genuine network
+    failure (offline/DNS/connection reset); an HTTP 4xx/5xx instead
+    resolves normally and becomes a regular `Error` further down the
+    same code path, so a real server error still shows as an error
+    rather than silently queuing forever.
+  - A queued message shows immediately as a normal message bubble with
+    a "⏳ Queued — will send once you're back online" badge, and an
+    "⚡ You're offline" banner appears above the composer for as long
+    as `navigator.onLine` is false. Both persist correctly across a
+    page reload (`loadAndRenderQueuedMessages()` re-renders anything
+    still queued for the open conversation from IndexedDB alongside
+    the server's real history) — a queued message is never silently
+    dropped just because the tab was closed before reconnecting.
+  - Flushing (`flushOfflineQueue()`) runs on the browser's `online`
+    event, right after opening/loading a conversation, and stops
+    immediately if `navigator.onLine` flips back to false mid-flush —
+    everything from that point on stays safely in IndexedDB rather
+    than being lost or retried in a tight loop. A queued item is only
+    ever removed from IndexedDB *after* its resend actually succeeds
+    (not before), so an interrupted flush can't lose a message.
+  - ⚠️ **Scoped limitation, by design**: this covers composing on an
+    already-open `/chat` tab that then loses connectivity — it does
+    **not** make a fresh page load work offline. `frontend/static/sw.js`
+    deliberately never caches `/chat` itself (its own header comment:
+    "chat data must always come from the network, never a stale
+    cache"), since the page is rendered per-request server-side and
+    isn't safe to serve stale from a shared cache; reloading `/chat`
+    while genuinely offline still falls through to the existing
+    `/offline` fallback page from Phase 17, not a working composer.
+  - Verified with real IndexedDB behavior (not just a syntax check):
+    `fake-indexeddb` running `offline-queue.js` unmodified under
+    Node confirmed insertion-order preservation, correct
+    per-conversation filtering, a correct add → get → remove round
+    trip, a removal of a non-existent id not throwing, and a clean
+    rejected promise (not a crash) when `indexedDB` itself is
+    unavailable. `node -c` passes on both changed/new JS files, the
+    Jinja template parses, and `/chat` renders via a local Flask dev
+    server with `offline-queue.js` correctly included before
+    `chat.js` and the offline banner markup present.
+    ⚠️ **Not verified**: the actual browser `online`/`offline` events
+    and a real flaky-connection `fetch()` `TypeError` were not
+    exercised in a real browser (no headless browser available in
+    this environment) — only the IndexedDB layer and the page
+    rendering were checked directly.
 
 ## Run locally
 
