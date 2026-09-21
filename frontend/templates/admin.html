@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>Admin — EASTA</title>
+
+    {% include "_theme_init.html" %}
+    {% include "_pwa_head.html" %}
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='styles.css') }}"
+    >
+</head>
+
+<body class="usage-page">
+
+    <div class="usage-shell">
+
+        <div class="usage-header">
+            <div class="brand-row">
+                <img
+                    class="brand-mark"
+                    src="{{ url_for('static', filename='icons/icon-square.png') }}"
+                    alt="EASTA"
+                >
+                <div>
+                    <h1>Admin</h1>
+                </div>
+            </div>
+
+            <a href="{{ url_for('chat') }}" class="btn btn-secondary">
+                &larr; Back to chat
+            </a>
+        </div>
+
+        <div id="admin-denied" class="usage-panel" hidden>
+            <h2>Not authorized</h2>
+            <p class="account-meta">
+                This page is only visible to EASTA administrators.
+            </p>
+        </div>
+
+        <div id="admin-content" hidden>
+
+            <div class="stat-grid" id="admin-stat-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Users</div>
+                    <div class="stat-value" id="admin-stat-users">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Organizations</div>
+                    <div class="stat-value" id="admin-stat-organizations">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Conversations</div>
+                    <div class="stat-value" id="admin-stat-conversations">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Messages</div>
+                    <div class="stat-value" id="admin-stat-messages">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Documents</div>
+                    <div class="stat-value" id="admin-stat-documents">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Total spend</div>
+                    <div class="stat-value" id="admin-stat-cost">—</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Total calls</div>
+                    <div class="stat-value" id="admin-stat-calls">—</div>
+                </div>
+            </div>
+
+            <div class="usage-panel">
+                <h2>Signups, last 30 days</h2>
+
+                <div class="chart-wrap">
+                    <canvas id="admin-signups-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="usage-panel">
+                <h2>All users</h2>
+
+                <div class="table-scroll">
+                    <table class="usage-table" id="admin-users-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Email</th>
+                                <th>Plan</th>
+                                <th>Admin</th>
+                                <th>Conversations</th>
+                                <th>Spend</th>
+                                <th>Joined</th>
+                            </tr>
+                        </thead>
+                        <tbody id="admin-users-table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <script>
+        window.BACKEND_URL = {{ backend_url | tojson }};
+    </script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+    <script src="{{ url_for('static', filename='admin.js') }}"></script>
+    <script src="{{ url_for('static', filename='pwa.js') }}"></script>
+
+</body>
+</html>

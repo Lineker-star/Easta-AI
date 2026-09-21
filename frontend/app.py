@@ -130,6 +130,21 @@ def join_organization_page(invite_token):
     )
 
 
+@app.get("/admin")
+def admin_page():
+    # No server-side admin check here -- this route just renders the
+    # shell; admin.js immediately calls GET /api/admin/stats and shows
+    # a plain "not authorized" state on a 403 rather than the dashboard.
+    # The real enforcement is backend-side (require_admin()), same
+    # division of responsibility as every other page in this app (the
+    # frontend process has no session/DB access of its own to check
+    # against).
+    return render_template(
+        "admin.html",
+        backend_url=BACKEND_URL,
+    )
+
+
 @app.get("/transcriptions")
 @app.get("/transcriptions/<int:job_id>")
 def transcriptions(job_id=None):

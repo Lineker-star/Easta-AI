@@ -69,6 +69,15 @@ CREATE TABLE IF NOT EXISTS public.users (
     -- verified email) without changing this -- it only reflects how
     -- the row itself was first created.
     auth_provider character varying(20) NOT NULL DEFAULT 'password',
+    -- Phase 23: platform-wide admin view (GET /api/admin/*), distinct
+    -- from an organization's per-org 'owner' role above -- this grants
+    -- visibility across every user/org on the whole instance, not just
+    -- one org. Nobody can grant this to themselves through the app;
+    -- there's no API route that ever sets it (deliberately -- see
+    -- require_admin() in backend/app.py). Flip it by hand in the
+    -- database for whoever should have it:
+    --   UPDATE users SET is_admin = true WHERE username = '...';
+    is_admin boolean NOT NULL DEFAULT false,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT users_plan_check CHECK (((plan)::text = ANY ((ARRAY['free'::character varying, 'premium'::character varying])::text[]))),
     CONSTRAINT users_auth_provider_check CHECK (((auth_provider)::text = ANY ((ARRAY['password'::character varying, 'google'::character varying])::text[])))
@@ -79,6 +88,7 @@ CREATE TABLE IF NOT EXISTS public.users (
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS plan character varying(20) NOT NULL DEFAULT 'free';
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS google_id character varying(255) UNIQUE;
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS auth_provider character varying(20) NOT NULL DEFAULT 'password';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false;
 ALTER TABLE public.users ALTER COLUMN password_hash DROP NOT NULL;
 
 ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_auth_provider_check;

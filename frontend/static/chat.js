@@ -2376,6 +2376,16 @@ async function loadSession() {
     currentUser.textContent = t("logged_in_as", {
         username: data.user.username
     });
+
+    // Hide-rather-than-show-broken, same pattern as the Google
+    // sign-in button / mic button: the link only ever appears once
+    // the backend itself confirms this session is an admin (a fresh
+    // per-request DB check, not something cached client-side).
+    const adminLink = document.getElementById("admin-link");
+    if (adminLink) {
+        adminLink.hidden = !data.user.is_admin;
+    }
+
     return true;
 }
 

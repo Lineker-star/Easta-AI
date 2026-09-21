@@ -999,6 +999,60 @@ production traffic. Pick these up in Cursor:
     schema.sql migration note earlier in this file); apply
     `database/schema.sql`'s new `ALTER TABLE`/`CREATE TABLE`
     statements by hand against any existing database.
+- **Admin view (Phase 23)** — a new `users.is_admin` boolean (default
+  `false`). Deliberately no API route ever sets it — there's no self-
+  service or promote/demote endpoint anywhere in the app, on purpose,
+  to avoid any path to privilege escalation. Grant it by hand:
+  `UPDATE users SET is_admin = true WHERE username = '...';` (see the
+  comment above the column in `database/schema.sql`).
+  - `require_admin()` in `backend/app.py` gates two new endpoints with
+    a plain 403 (not org-membership's existence-hiding 404 — there's
+    nothing to hide here, every user already knows `/api/admin/*`
+    exists): `GET /api/admin/stats` (platform-wide totals — users,
+    organizations, conversations, messages, documents, total spend/
+    calls, and signups for the last 30 days) and `GET /api/admin/users`
+    (every user on the instance with plan, admin status, conversation
+    count, and total spend, via the same `LEFT JOIN`-so-zero-usage-
+    still-shows-up pattern as the Phase 22 org cost breakdown).
+  - `is_admin` now rides along on `GET /api/session` and
+    `GET /api/account` — session's copy is a fresh per-request DB
+    lookup (not cached in the signed session cookie), so granting or
+    revoking admin by hand takes effect on that user's very next page
+    load rather than only after they log out and back in.
+  - Frontend: a new `/admin` page (`admin.html` + `admin.js`, styled
+    entirely from existing `.usage-panel`/`.stat-grid`/`.usage-table`
+    classes — no new CSS needed) with the same stat-grid + Chart.js
+    layout as the personal/org cost dashboards, plus a full user
+    table. A **🛡️ Admin** sidebar link appears only once `chat.js`'s
+    session check confirms `is_admin` — the same hide-rather-than-
+    show-broken pattern already used for the Google sign-in button and
+    the mic button. The page itself has no server-side gate (the
+    frontend process has no DB/session access of its own to check
+    against, same as every other page here) — it calls
+    `GET /api/admin/stats` immediately and shows a plain "not
+    authorized" panel on a 403 rather than rendering the dashboard.
+  - A real bug caught while wiring this up: `get_user_by_id()`'s
+    return tuple gained a 7th field (`is_admin`), and two existing call
+    sites destructured it positionally with exactly 6 names each
+    (`GET /api/account`, `GET /v1/me`) — both would have raised "too
+    many values to unpack" on the very next request. Fixed by adding
+    the new field at the *end* of the tuple (not inserted in the
+    middle, unlike the earlier `user_id` lesson from Phase 21) and
+    updating both unpacks explicitly; the two call sites that already
+    used index access (`user[3]`, `user[5]`) needed no change since
+    their indices didn't shift.
+  - Verified via `TestClient` with the DB mocked: a non-admin gets 403
+    from both admin routes; an admin gets correctly-shaped stats and
+    user-list responses; `GET /api/session` reflects `is_admin: true`/
+    `false` correctly for the same logged-in session depending on what
+    `is_user_admin()` returns (a live check, not a stale cached value);
+    and `GET /api/account` now includes `is_admin`. `/admin` and
+    `/chat` both render via a local Flask dev server, and every
+    changed `.py`/`.js` file passes `py_compile`/`node -c`.
+    ⚠️ **Not verified**: real browser rendering/interaction, and no
+    real Postgres migration was run (same caveat as every phase above
+    — apply the new `ALTER TABLE` by hand against any existing
+    database).
 
 ## Run locally
 

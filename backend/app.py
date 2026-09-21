@@ -605,15 +605,18 @@ def create_google_user(google_id: str, email: str, username: str):
 
 
 def get_user_by_id(user_id: int):
-    """Returns (id, username, email, password_hash, created_at, plan)
-    for the Account page -- unlike get_user_by_username()/
+    """Returns (id, username, email, password_hash, created_at, plan,
+    is_admin) for the Account page -- unlike get_user_by_username()/
     get_user_by_email() (used only for login/uniqueness checks), this
-    includes everything the profile/plan sections need in one query."""
+    includes everything the profile/plan/admin sections need in one
+    query. is_admin appended at the end (not inserted in the middle)
+    so every existing positional unpack of this tuple keeps working
+    unless explicitly updated to read it."""
     with psycopg.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, username, email, password_hash, created_at, plan
+                SELECT id, username, email, password_hash, created_at, plan, is_admin
                 FROM users
                 WHERE id = %s;
                 """,
@@ -621,6 +624,30 @@ def get_user_by_id(user_id: int):
             )
 
             return cursor.fetchone()
+
+
+def is_user_admin(user_id: int) -> bool:
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT is_admin FROM users WHERE id = %s;",
+                (user_id,),
+            )
+
+            row = cursor.fetchone()
+            return bool(row and row[0])
+
+
+def require_admin(user_id: int) -> None:
+    """403, not 404 -- unlike require_org_member()'s org-hiding 404,
+    there's nothing to hide the existence of here (every user already
+    knows /api/admin/* exists), so the ordinary "you can't do this"
+    status is the right one."""
+    if not is_user_admin(user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required.",
+        )
 
 
 def update_user_profile(user_id: int, username: str, email: str):
@@ -5219,6 +5246,11 @@ def get_session(request: Request):
         "user": {
             "id": user_id,
             "username": username,
+            # A fresh DB lookup (not cached in the session cookie) so
+            # granting/revoking admin by hand in the database takes
+            # effect on this user's very next page load, not only
+            # after they log out and back in.
+            "is_admin": is_user_admin(user_id),
         },
     }
 
@@ -5248,7 +5280,7 @@ def get_account(request: Request):
             detail="Account not found.",
         )
 
-    _id, username, email, _password_hash, created_at, plan = user
+    _id, username, email, _password_hash, created_at, plan, is_admin = user
 
     return {
         "id": user_id,
@@ -5256,6 +5288,7 @@ def get_account(request: Request):
         "email": email,
         "created_at": serialize_datetime(created_at),
         "plan": plan,
+        "is_admin": is_admin,
     }
 
 
@@ -7016,6 +7049,116 @@ def delete_organization_document_route(
     return {"message": "Document deleted."}
 
 
+# --- Routes: admin (Phase 23) ------------------------------------------------
+# Platform-wide, instance-owner-only visibility -- distinct from an
+# organization owner's combined dashboard above (that's scoped to one
+# org; this is every user/org/conversation on the whole instance). See
+# require_admin() and the is_admin column comment in database/schema.sql
+# for how someone gets this -- there's no self-service route, on purpose.
+
+@app.get("/api/admin/stats")
+def admin_stats_route(request: Request):
+    user_id = require_user(request)
+    require_admin(user_id)
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM users;")
+            total_users = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM organizations;")
+            total_organizations = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM conversations;")
+            total_conversations = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM messages;")
+            total_messages = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM documents;")
+            total_documents = cursor.fetchone()[0]
+
+            cursor.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0), COUNT(*) FROM usage_logs;"
+            )
+            total_cost_usd, total_calls = cursor.fetchone()
+
+            cursor.execute(
+                """
+                SELECT
+                    date_trunc('day', created_at)::date AS day,
+                    COUNT(*)
+                FROM users
+                WHERE created_at > NOW() - INTERVAL '30 days'
+                GROUP BY day
+                ORDER BY day;
+                """
+            )
+            signups_by_day = cursor.fetchall()
+
+    return {
+        "total_users": total_users,
+        "total_organizations": total_organizations,
+        "total_conversations": total_conversations,
+        "total_messages": total_messages,
+        "total_documents": total_documents,
+        "total_cost_usd": float(total_cost_usd),
+        "total_calls": total_calls,
+        "signups_by_day": [
+            {"day": row[0].isoformat(), "count": row[1]}
+            for row in signups_by_day
+        ],
+    }
+
+
+@app.get("/api/admin/users")
+def admin_users_route(request: Request):
+    user_id = require_user(request)
+    require_admin(user_id)
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            # LEFT JOINs so a brand-new user with zero conversations/
+            # spend still shows up with 0 rather than being silently
+            # absent -- same reasoning as get_organization_usage()'s
+            # per-member breakdown above.
+            cursor.execute(
+                """
+                SELECT
+                    u.id,
+                    u.username,
+                    u.email,
+                    u.plan,
+                    u.is_admin,
+                    u.created_at,
+                    COUNT(DISTINCT c.id) AS conversation_count,
+                    COALESCE(SUM(ul.cost_usd), 0) AS total_cost
+                FROM users u
+                LEFT JOIN conversations c ON c.user_id = u.id
+                LEFT JOIN usage_logs ul ON ul.user_id = u.id
+                GROUP BY u.id
+                ORDER BY u.created_at DESC;
+                """
+            )
+            rows = cursor.fetchall()
+
+    return {
+        "users": [
+            {
+                "id": row[0],
+                "username": row[1],
+                "email": row[2],
+                "plan": row[3],
+                "is_admin": row[4],
+                "created_at": serialize_datetime(row[5]),
+                "conversation_count": row[6],
+                "total_cost": float(row[7]),
+            }
+            for row in rows
+        ]
+    }
+
+
 # --- Routes: usage / cost dashboard -----------------------------------------
 
 @app.get("/api/usage/summary")
@@ -7331,6 +7474,6 @@ def public_me(request: Request):
             detail="Account not found.",
         )
 
-    _id, username, _email, _password_hash, _created_at, plan = user
+    _id, username, _email, _password_hash, _created_at, plan, _is_admin = user
 
     return {"username": username, "plan": plan}
