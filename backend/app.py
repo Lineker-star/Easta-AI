@@ -15,7 +15,9 @@ import urllib.parse
 import zipfile
 from collections import defaultdict, deque
 from collections.abc import Generator
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 import mistune
 import psycopg
@@ -379,6 +381,109 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type"],
 )
+
+
+# Two candidate locations, checked in order: the normal repo layout
+# (backend/app.py's parent.parent -- works for local dev, and for
+# Sevalla as long as its "build path" setting still checks out the
+# full repo and only scopes *build/run commands* to backend/, which is
+# the common behavior for this kind of PaaS setting), and a copy
+# living inside backend/ itself, in case a build path ever does
+# genuinely exclude everything outside it. Resolving via `Path(__file__)`
+# rather than a relative/CWD-based path so this works the same
+# regardless of what directory the process was actually started from.
+_BACKEND_DIR = Path(__file__).resolve().parent
+_SCHEMA_SQL_CANDIDATES = [
+    _BACKEND_DIR.parent / "database" / "schema.sql",
+    _BACKEND_DIR / "database" / "schema.sql",
+]
+
+
+def _find_schema_sql_path() -> Path:
+    for candidate in _SCHEMA_SQL_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+
+    checked = "\n".join(f"  - {c}" for c in _SCHEMA_SQL_CANDIDATES)
+    raise RuntimeError(
+        "database/schema.sql not found -- checked:\n"
+        f"{checked}\n"
+        "If the backend is deployed from a build path that excludes "
+        "everything outside backend/ (e.g. a Sevalla 'build path' set "
+        "to `backend` that only checks out that subdirectory), copy "
+        "schema.sql into backend/database/schema.sql, or adjust the "
+        "build path so the full repository checkout is present on disk."
+    )
+
+
+def apply_schema_migration() -> None:
+    """Applies database/schema.sql against DATABASE_URL. Called once
+    at startup (see `lifespan` below), before the app accepts any
+    requests -- replaces "remember to manually re-run schema.sql after
+    every deploy," which caused three separate production incidents
+    (most recently: users.is_admin missing live, which took down the
+    entire app's session check -- every page stuck on "Checking your
+    session..." -- see README.md's "Production incident fix" note).
+
+    Every statement in schema.sql is written to be additive and
+    idempotent -- `CREATE TABLE IF NOT EXISTS` for new tables,
+    `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for columns added to a
+    table that already existed (see the STANDING CONVENTION comment at
+    the top of that file) -- so re-running the whole file on every
+    single startup, including ones where nothing changed, is safe: a
+    no-op statement stays a no-op no matter how many times it runs.
+
+    The entire file is sent to Postgres as one script in a single
+    `cursor.execute()` call (no parameters -- see psycopg's own docs
+    on this) rather than split into individual statements client-side.
+    This lets Postgres's own parser handle statement boundaries and
+    comments correctly (schema.sql's comments contain literal
+    semicolons in places, e.g. "PostgreSQL 14+; uses only...", which
+    would break a naive client-side `.split(";")`), and it means the
+    whole migration commits (or rolls back) as one atomic unit via the
+    same `with psycopg.connect(...) as connection:` pattern used
+    everywhere else in this file.
+
+    A failure here is fatal on purpose (the exception propagates,
+    which stops the app from starting at all): an app that starts up
+    successfully against a schema it doesn't actually match will
+    silently serve broken requests -- exactly what happened those
+    three times -- instead of failing loudly where it's immediately
+    visible in deploy logs, before a single real user request is ever
+    served against the mismatched schema.
+    """
+    started_at = time.monotonic()
+
+    try:
+        schema_path = _find_schema_sql_path()
+        schema_sql = schema_path.read_text(encoding="utf-8")
+
+        with psycopg.connect(DATABASE_URL) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(schema_sql)
+    except Exception as error:
+        # report_error() also prints, so the failure is visible in
+        # stdout/deploy logs even with Sentry unconfigured -- then
+        # re-raise so the app still fails to start (see the docstring
+        # above for why that's deliberate).
+        report_error("startup schema migration failed", error)
+        raise
+
+    elapsed_ms = (time.monotonic() - started_at) * 1000
+
+    print(
+        f"EASTA: startup schema migration applied "
+        f"({schema_path}, {len(schema_sql):,} bytes, {elapsed_ms:.0f}ms)."
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    apply_schema_migration()
+    yield
+
+
+app.router.lifespan_context = lifespan
 
 
 class LoginRequest(BaseModel):

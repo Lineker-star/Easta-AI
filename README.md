@@ -1373,11 +1373,11 @@ production traffic. Pick these up in Cursor:
     readable error rather than a masked one, and the actual fix is
     still to re-run the migration, not to make every query
     individually defensive.
-  - **The definitive fix is still operational, not code**: re-run
-    `database/schema.sql` against the production database (see "Update
-    the live application" above) — it's additive/idempotent, safe to
-    run any time, and brings every column from Phase 18 through Phase
-    28 up to date in one pass.
+  - **The definitive fix at the time was operational, not code**:
+    re-run `database/schema.sql` against the production database.
+    That's since been automated entirely — see "Automatic schema
+    migration on startup" below, added specifically because this exact
+    manual step had already caused three separate incidents.
   - Separately, `frontend/static/sw.js`'s `CACHE_NAME` hadn't been
     bumped since Phase 17, despite Phases 18–28 repeatedly changing
     `/static/` content (`i18n/*.json` in particular) — the service
@@ -1404,6 +1404,71 @@ production traffic. Pick these up in Cursor:
     (`GET /api/conversations`) and confirmed a clean, CORS-safe 500
     with a readable `detail`. `py_compile` passes; `node -c` passes on
     `sw.js`.
+- **Automatic schema migration on startup.** Replaces the manual
+  "remember to re-run `schema.sql` after every deploy" step entirely —
+  the step that directly caused all three production incidents
+  documented above, most recently the one right above this entry.
+  - New `apply_schema_migration()` in `backend/app.py`, run once via a
+    `lifespan` context manager before the app accepts its first
+    request: reads `database/schema.sql` and executes the whole file
+    as a single `cursor.execute()` call with no parameters. Sent that
+    way deliberately — Postgres's own parser then handles statement
+    boundaries and comments correctly (some of `schema.sql`'s own
+    comments contain literal semicolons, e.g. "PostgreSQL 14+; uses
+    only...", which would break a naive client-side `.split(";")`),
+    and the whole file runs as one atomic implicit transaction:
+    commits together, or rolls back together, via the same
+    `with psycopg.connect(...) as connection:` pattern used everywhere
+    else in this file.
+  - Safe on **every** startup, not just after a change — every
+    statement in `schema.sql` is additive and idempotent by the
+    STANDING CONVENTION documented at the top of that file, so
+    re-applying it against a database that already has everything is a
+    genuine no-op, not merely a low-risk one.
+  - A migration failure is fatal **on purpose**: the exception
+    propagates and stops the app from starting at all, rather than
+    letting it come up successfully against a schema it doesn't
+    actually match (exactly what silently happened all three previous
+    times). Look for `EASTA: startup schema migration applied` in
+    Sevalla's backend logs on success, or
+    `EASTA: startup schema migration failed: ...` with the real
+    underlying error otherwise — also reported to Sentry via Phase
+    26's `report_error()` when configured.
+  - Resolves `database/schema.sql`'s location via the running file's
+    own path (`Path(__file__)`), not the working directory, checking
+    two candidates in order: the normal repo layout
+    (`backend/app.py`'s parent directory's sibling `database/` folder)
+    and a copy inside `backend/database/` as a fallback. This matters
+    specifically because the backend's Sevalla application builds from
+    the `backend` build path (a sibling of `database/`, not a parent —
+    see "Deploy the backend" above): if a future build configuration
+    ever genuinely excludes everything outside `backend/` from the
+    checkout, the very clear `RuntimeError` this raises tells you
+    exactly what's missing and exactly how to fix it (copy
+    `schema.sql` into `backend/database/schema.sql`) rather than
+    failing in a way that's hard to diagnose.
+  - The "Deploy PostgreSQL" and "Update the live application" sections
+    below were rewritten accordingly — the manual `psql -f schema.sql`
+    commands are kept only as an optional, still-safe-to-run-anytime
+    fallback for manual inspection/troubleshooting, not as a required
+    step anymore.
+  - Verified directly (DB calls mocked, no live Postgres available in
+    this environment): the success path executes the real, full
+    `schema.sql` content via a single no-params `cursor.execute()`
+    call and logs the expected message; a DB error during migration is
+    fatal (`TestClient`'s startup genuinely fails to enter, the same
+    as a real ASGI server failing to boot) and reported via
+    `report_error()`; and a simulated missing-file scenario (standing
+    in for a Sevalla build-path change that excludes `database/`)
+    raises the clear, actionable `RuntimeError` rather than a bare
+    `FileNotFoundError`, and is equally fatal. `py_compile` passes.
+    ⚠️ **Not verified**: an actual run against a real Postgres database
+    (no live Postgres available in this environment), and Sevalla's
+    real build-path checkout behavior (documented above as the
+    single biggest remaining assumption — watch the first backend
+    deploy log after this ships to confirm it either applies
+    successfully or fails with the clear, actionable error rather than
+    silently skipping).
 
 ## Run locally
 
@@ -1590,7 +1655,18 @@ In Sevalla:
 4.  Copy the external database `HOST`, `USER`, `PORT`, and `DATABASE`
     values.
 
-From the local `database` folder, run:
+That's it — you do **not** need to manually run `schema.sql` against
+this database. The backend applies it automatically on every startup
+(see `apply_schema_migration()` in `backend/app.py`), including the
+very first one: `CREATE TABLE IF NOT EXISTS` creates the whole schema
+from nothing just as readily as it converges an existing database. The
+`users`, `conversations`, `messages`, `documents`, and `usage_logs`
+tables (and everything since) will appear in Sevalla Studio once the
+backend has started once.
+
+If you ever want to run it by hand anyway (to inspect the database
+before the backend's first boot, or to debug a migration failure shown
+in the backend's logs), the manual command still works:
 
 ``` bash
 psql \
@@ -1598,14 +1674,11 @@ psql \
 -U USER \
 -p PORT \
 -d DATABASE \
--f schema.sql
+-f database/schema.sql
 ```
 
 Replace the uppercase placeholders with the External Connection
 details from Sevalla.
-
-After the command finishes, the `users`, `conversations`, `messages`,
-`documents`, and `usage_logs` tables should appear in Sevalla Studio.
 
 ### 2. Deploy the backend
 
@@ -1791,26 +1864,54 @@ git push origin main
 Sevalla will detect the GitHub change and redeploy the affected
 application.
 
-⚠️ **This redeploys the code only — it never touches the database.**
-If your change modified `database/schema.sql` (added a column, a
-table, a constraint, ...), the running app will start querying columns
-that don't exist yet in the live database until you separately re-run
-schema.sql against it, the same command as the "Deploy PostgreSQL"
-step above:
+**The database migrates itself.** Every backend startup — including
+the one this redeploy just triggered — runs
+`apply_schema_migration()` before accepting any requests: it applies
+the full `database/schema.sql` against `DATABASE_URL` and only then
+starts serving traffic. If your change modified `schema.sql` (added a
+column, a table, a constraint, ...), it's already live by the time the
+new backend instance is actually taking requests — there's no longer a
+separate step to remember, which is exactly what caused three
+consecutive production incidents when it was a manual one (most
+recently: `users.is_admin` missing live — see "Production incident
+fix" above).
+
+This is safe on every single startup, not just ones that actually
+changed something — every statement in `schema.sql` is written to be
+additive and idempotent (`CREATE TABLE IF NOT EXISTS` for new tables,
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for columns added to a
+table that already existed — see the note at the top of
+`database/schema.sql` for why both are needed), so re-applying
+everything on a database that already has all the changes is a no-op,
+not a risk.
+
+A migration failure is **fatal on purpose** — the backend refuses to
+start rather than come up against a schema it doesn't match, so a
+broken migration shows up immediately as a failed deploy in Sevalla's
+logs (look for `EASTA: startup schema migration applied` on success,
+or `EASTA: startup schema migration failed: ...` with the real error
+otherwise), not as a mysteriously broken live app discovered later.
+One thing worth knowing about this specific setup: the backend's
+Sevalla application builds from the `backend` build path (see
+"Backend build settings" above), which is a sibling of `database/`,
+not a parent of it — `apply_schema_migration()` resolves
+`database/schema.sql`'s location via the running file's own path
+rather than the working directory, so this works as long as Sevalla's
+build still checks out the full repository (it does, for a standard
+git-connected build — "build path" scopes which directory the
+build/start *commands* run from, not what's present on disk). If a
+future build setup ever genuinely excludes everything outside
+`backend/`, the startup failure message tells you exactly what to do
+about it (copy `schema.sql` into `backend/database/schema.sql`) rather
+than failing in a way that's hard to diagnose.
+
+You can still run the migration by hand any time — useful for
+inspecting a database before the backend's next deploy, or confirming
+a fix without waiting on a redeploy:
 
 ``` bash
 psql -h HOST -U USER -p PORT -d DATABASE -f database/schema.sql
 ```
-
-This is safe to run any time, including against a database that
-already has some of the changes — every statement in `schema.sql` is
-written to be additive and idempotent (`CREATE TABLE IF NOT EXISTS`
-for new tables, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for columns
-added to a table that already existed — see the note at the top of
-`database/schema.sql` for why both are needed). Get in the habit of
-re-running it after every deploy that touched `schema.sql`, not just
-ones you remember changing a column — it's a no-op if nothing changed,
-so there's no cost to running it "just in case."
 
 ## Suggested next steps (in Cursor)
 
