@@ -37,7 +37,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from openai import OpenAI
 from pptx import Presentation
 from pptx.dml.color import RGBColor as PptxRGBColor
@@ -64,6 +64,7 @@ from reportlab.platypus import (
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from werkzeug.security import (
     check_password_hash,
@@ -331,6 +332,44 @@ app.add_middleware(
     same_site=COOKIE_SAMESITE,
     https_only=COOKIE_SECURE,
 )
+
+
+class CatchUnhandledErrorsMiddleware(BaseHTTPMiddleware):
+    """Without this, an unhandled exception (e.g. a DB error from a
+    schema/production-migration gap -- exactly what caused the real
+    production outage this was added to fix) is caught by Starlette's
+    own ServerErrorMiddleware, which sits OUTSIDE CORSMiddleware in the
+    ASGI stack. Its generic 500 response never passes back through
+    CORSMiddleware, so it has no CORS headers -- a cross-origin
+    frontend's fetch() call then sees the response blocked by the
+    browser and reports the opaque, misleading "Failed to fetch"
+    instead of a real error, hiding the actual problem completely.
+
+    A plain `@app.exception_handler(Exception)` does NOT reliably fix
+    this in the FastAPI/Starlette versions this app runs on -- verified
+    directly: the substitute response it returns does not flow back
+    through CORSMiddleware's `send` wrapper either. A BaseHTTPMiddleware
+    registered *before* CORSMiddleware (so CORSMiddleware ends up
+    wrapping it, not the other way around) does work -- also verified
+    directly, including that it leaves normal HTTPException responses
+    (404s, 400s, ...) completely untouched. Must stay registered before
+    the CORSMiddleware call below, not after."""
+
+    async def dispatch(self, request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception as error:  # noqa: BLE001 - last-resort catch-all, re-reported below
+            report_error(
+                f"unhandled exception on {request.method} {request.url.path}",
+                error,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Something went wrong. Please try again."},
+            )
+
+
+app.add_middleware(CatchUnhandledErrorsMiddleware)
 
 
 app.add_middleware(
@@ -5379,6 +5418,22 @@ def get_session(request: Request):
             "user": None,
         }
 
+    # This is the very first request every page makes (loadSession()
+    # in chat.js) -- whether someone is logged in at all must never
+    # hard-depend on a secondary feature's lookup succeeding. Without
+    # this try/except, a DB error here (e.g. users.is_admin missing
+    # because a migration hasn't been applied yet) 500s this route for
+    # every single page load, permanently stuck on "Checking your
+    # session..." with no way to even reach a page showing a clear
+    # error. Degrade to is_admin: false and report the real error
+    # instead -- the rest of the app stays usable while the underlying
+    # issue (almost always: re-run database/schema.sql) gets fixed.
+    try:
+        is_admin = is_user_admin(user_id)
+    except Exception as error:  # noqa: BLE001 - best-effort, see comment above
+        report_error("is_user_admin() lookup failed during session check", error)
+        is_admin = False
+
     return {
         "logged_in": True,
         "user": {
@@ -5388,7 +5443,7 @@ def get_session(request: Request):
             # granting/revoking admin by hand in the database takes
             # effect on this user's very next page load, not only
             # after they log out and back in.
-            "is_admin": is_user_admin(user_id),
+            "is_admin": is_admin,
         },
     }
 

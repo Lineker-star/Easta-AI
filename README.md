@@ -1328,6 +1328,82 @@ production traffic. Pick these up in Cursor:
     backend route behavior. Run `cd e2e && npx playwright install
     --with-deps chromium && npm test` against a real disposable stack
     before trusting this suite in CI/pre-deploy.
+- **Production incident fix: "Failed to fetch" on `/chat`, and raw
+  i18n keys in the sidebar.** Root cause of both was the exact
+  migration gap `database/schema.sql`'s own header comment warns
+  about: production hadn't been re-migrated since before Phase 18, so
+  `users.is_admin` (Phase 23) didn't exist live. That alone was enough
+  to take down the *entire app* for every logged-in user, plus it
+  exposed a real, separate bug in how FastAPI/CORS interact here:
+  - `GET /api/session` — the very first request every page makes
+    (`loadSession()` in `chat.js`) — now does a DB lookup for
+    `is_admin` (added in Phase 23). With that column missing, the
+    lookup raised `UndefinedColumn`, which Starlette's
+    `ServerErrorMiddleware` catches *outside* `CORSMiddleware` in the
+    ASGI stack — its generic 500 response never gets CORS headers, so
+    a cross-origin `fetch()` call sees the response blocked by the
+    browser and reports the opaque `TypeError: Failed to fetch`
+    instead of any real error. That's why the page never got past
+    "Checking your session..." — not a network problem at all, a
+    masked 500.
+  - Confirmed a plain `@app.exception_handler(Exception)` does **not**
+    reliably fix this on the FastAPI/Starlette versions this app runs
+    on — verified directly (a `TestClient` check with `CORSMiddleware`
+    registered): the substitute response it returns still doesn't flow
+    back through `CORSMiddleware`'s header-injecting `send` wrapper. A
+    new `CatchUnhandledErrorsMiddleware` (`BaseHTTPMiddleware`,
+    registered in `backend/app.py` *before* `CORSMiddleware` so CORS
+    ends up wrapping it) does work — also verified directly, including
+    that normal `HTTPException` responses (404s, 400s, ...) and their
+    exact status/detail are completely unaffected. Every unhandled
+    exception anywhere in the app now returns a clean, CORS-safe,
+    generic 500 instead of manifesting as a confusing "Failed to
+    fetch" on the frontend, and reports through Phase 26's
+    `report_error()` (stdout + Sentry when configured) so the real
+    cause is actually visible in logs going forward.
+  - `GET /api/session` specifically also got a defensive try/except
+    around the `is_admin` lookup — degrading to `is_admin: false` and
+    reporting the error, rather than 500ing. This is deliberately
+    narrow: it's the one literal all-or-nothing gate every page load
+    depends on before anything else can even run, so it's the one
+    place worth hardening beyond "now fails with a clear error instead
+    of an opaque one." Every other query added since Phase 18 (search,
+    pinning, sharing, orgs, ...) is left as-is — with the CORS fix
+    above, a still-missing column there now surfaces as a real,
+    readable error rather than a masked one, and the actual fix is
+    still to re-run the migration, not to make every query
+    individually defensive.
+  - **The definitive fix is still operational, not code**: re-run
+    `database/schema.sql` against the production database (see "Update
+    the live application" above) — it's additive/idempotent, safe to
+    run any time, and brings every column from Phase 18 through Phase
+    28 up to date in one pass.
+  - Separately, `frontend/static/sw.js`'s `CACHE_NAME` hadn't been
+    bumped since Phase 17, despite Phases 18–28 repeatedly changing
+    `/static/` content (`i18n/*.json` in particular) — the service
+    worker's fetch handler cache-firsts *anything* under `/static/`,
+    not just its explicit shell-asset list, so a returning visitor's
+    browser kept serving a pre-Phase-18 `en.json` indefinitely. Any
+    interface string added since then fell through `i18n.js`'s `t()`
+    "key not found" fallback (`activeTranslations[key] || key`) and
+    rendered as the raw key name — exactly the `conversation_search_pla…`/
+    `knowledge_base_link` symptom reported. Fixed by bumping
+    `CACHE_NAME` to `easta-shell-v6`, which makes the service worker's
+    `activate` handler clear out the stale `v5` cache on next load.
+    Audited every `data-i18n`/`data-i18n-placeholder`/`data-i18n-title`
+    key referenced in `chat.html` plus every `t()` call in `chat.js`
+    against all three language files: all 27 HTML-referenced keys and
+    all 35 JS-referenced keys are present in `en.json`/`fr.json`/
+    `es.json` (47 entries each, nothing missing, nothing orphaned) — so
+    this was purely a stale-cache symptom, not a genuine content gap.
+  - Verified: the exact production failure was reproduced with the DB
+    mocked to raise `UndefinedColumn` from `is_user_admin()` inside a
+    real logged-in session — confirmed `GET /api/session` now returns
+    `200 {"is_admin": false}` instead of 500. A second, broader check
+    forced an unhandled exception in an unrelated route
+    (`GET /api/conversations`) and confirmed a clean, CORS-safe 500
+    with a readable `detail`. `py_compile` passes; `node -c` passes on
+    `sw.js`.
 
 ## Run locally
 
