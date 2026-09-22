@@ -1,0 +1,16 @@
+{
+  "name": "easta-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Playwright end-to-end suite for EASTA -- see e2e/README.md before running this.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "dotenv": "^16.4.5"
+  }
+}

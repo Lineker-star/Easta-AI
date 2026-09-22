@@ -139,6 +139,18 @@ GOOGLE_REDIRECT_URI = os.getenv(
 )
 ENABLE_GOOGLE_SIGNIN = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
+# Phase 27: lets the Playwright E2E suite (see e2e/tests/google-signin.spec.js)
+# exercise a real Google sign-in session -- account creation/linking,
+# session cookie, redirect to /chat -- without a live Google account or
+# OAuth credentials. GET /api/e2e/mock-google-callback below 404s
+# unless this is explicitly true. MUST NEVER be true in production --
+# it lets anyone who can reach the backend log in as any email address
+# with zero verification. Leave unset outside a disposable/staging
+# environment set up specifically to run this suite.
+ENABLE_E2E_GOOGLE_MOCK = (
+    os.getenv("EASTA_E2E_MOCK_GOOGLE_OAUTH", "false").lower() == "true"
+)
+
 # --- Model routing config -------------------------------------------------
 # EASTA picks between a fast/cheap model and a stronger "smart" model
 # depending on how complex the incoming message looks, and falls back to
@@ -5306,6 +5318,54 @@ def google_callback(
     next_path = request.session.pop("oauth_next", None)
 
     return RedirectResponse(f"{FRONTEND_URL}{next_path or '/chat'}")
+
+
+@app.get("/api/e2e/mock-google-callback")
+def e2e_mock_google_callback(
+    request: Request,
+    email: str,
+    name: str = "E2E Test User",
+):
+    """TEST-ONLY stand-in for the real GET /api/auth/google/callback
+    above -- skips actually contacting Google (no token exchange, no
+    profile fetch) but otherwise reuses the exact same account-
+    creation/linking and session-setting logic, so the session this
+    produces is indistinguishable from a real Google sign-in to the
+    rest of the app. Built for e2e/tests/google-signin.spec.js, which
+    has no way to drive a real Google consent screen in CI.
+
+    404s unless EASTA_E2E_MOCK_GOOGLE_OAUTH=true -- see that flag's
+    comment above for why this must never be reachable in production.
+    """
+    if not ENABLE_E2E_GOOGLE_MOCK:
+        raise HTTPException(status_code=404)
+
+    email = email.strip().lower()
+
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required.")
+
+    # A stable, deterministic fake google_id derived from the email --
+    # same test email always maps to the same mock account, so
+    # re-running the suite against the same disposable database signs
+    # back into the same user instead of piling up duplicates.
+    fake_google_id = f"e2e-mock-{hashlib.sha256(email.encode()).hexdigest()[:24]}"
+
+    user = get_user_by_google_id(fake_google_id)
+
+    if user is None:
+        existing = get_user_by_email(email)
+        if existing:
+            user = link_google_id(existing[0], fake_google_id)
+
+    if user is None:
+        username = generate_unique_username(name or email)
+        user = create_google_user(fake_google_id, email, username)
+
+    request.session["user_id"] = user[0]
+    request.session["username"] = user[1]
+
+    return RedirectResponse(f"{FRONTEND_URL}/chat")
 
 
 @app.get("/api/session")

@@ -1,0 +1,4 @@
+This is a small plain-text fixture used by e2e/tests/attachment.spec.js
+to exercise the composer's attach-file flow. Its content is
+deliberately short and distinctive so a test can assert the attachment
+chip shows this exact filename before the message is sent.

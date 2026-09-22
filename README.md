@@ -1268,6 +1268,66 @@ production traffic. Pick these up in Cursor:
     API for either model (no network access to OpenRouter in this
     environment) — only the fallback/logging logic itself was checked,
     against a mocked HTTP layer.
+- **End-to-end test suite (Phase 27)** — a new `e2e/` directory with a
+  Playwright suite, chosen over Cypress for better multi-browser
+  support and no separate paid dashboard needed for CI reporting. This
+  drives a real browser against a real, already-running EASTA stack
+  (Postgres + backend + frontend) — it does not mock the LLM, so
+  several tests wait on a real streamed OpenRouter reply.
+  - **One continuous flow** (`full-journey.spec.js`): register → log
+    out → log back in → send a message and get a streamed reply →
+    attach a file → generate a PDF (downloaded and verified by its
+    `%PDF-` magic-byte header, not just "a link appeared") → rename
+    the conversation → delete it — all in one session, to catch
+    anything that only breaks when these steps run back-to-back
+    against real, accumulating state.
+  - **Targeted specs** for each piece plus edge cases a single flow
+    wouldn't hit: `register.spec.js` (success, client-side password-
+    mismatch, duplicate username), `login.spec.js` (log out/in, wrong
+    password, `/chat` redirecting to `/login` when logged out),
+    `chat-message.spec.js`, `attachment.spec.js`,
+    `generate-document.spec.js`, `conversation-rename.spec.js`,
+    `conversation-delete.spec.js`.
+  - **Google Sign-In** (`google-signin.spec.js`) — explicitly not
+    skipped despite being the hardest one. There's no way to drive a
+    real Google consent screen from an automated browser (no live test
+    account to hold credentials for, and Google actively blocks
+    scripted sign-ins), so this exercises a new backend test-only
+    route instead: `GET /api/e2e/mock-google-callback` in
+    `backend/app.py`, added right after the real
+    `GET /api/auth/google/callback`. It skips only the actual network
+    round trip to Google (the token exchange and profile fetch) and
+    reuses the exact same account-creation/linking/session-setting
+    code as the real callback, so everything downstream of "we have a
+    verified Google profile" is exercised for real, not stubbed out.
+    Gated behind a new `EASTA_E2E_MOCK_GOOGLE_OAUTH` env var (404s
+    unless it's explicitly `true`) that must never be enabled in
+    production — see the loud warning on that flag in
+    `backend/.env.example` and in `e2e/README.md`.
+  - **Wired into the deploy process**: a new ⚠️ callout in this file's
+    "Deploy via Sevalla" → "Update the live application" section (the
+    same treatment as the existing schema.sql-migration callout) makes
+    running this suite against staging (or at minimum locally against
+    a disposable database) an explicit pre-deploy step, not an
+    afterthought.
+  - Verified: `npx playwright test --list` discovers all 9 spec files
+    /14 tests with no syntax or import errors; every `.js` file in
+    `e2e/` passes `node -c`; the new `GET /api/e2e/mock-google-callback`
+    route was verified directly via `TestClient` with the DB mocked —
+    404s with the flag off, and with it on, correctly derives a
+    stable per-email fake `google_id`, creates a new account on first
+    sign-in, and reuses the same account (skipping
+    `get_user_by_email()`/`create_google_user()` entirely) on a second
+    sign-in with the same mocked profile.
+    ⚠️ **Not verified**: no test in this suite was actually run end-to-
+    end against a live browser + live app in this environment —
+    `npx playwright install chromium` could not complete (no network
+    access to Playwright's browser-binary CDN here), so real browser
+    execution of these specs is unverified beyond static discovery and
+    manual review against the actual frontend markup/selectors and
+    backend route behavior. Run `cd e2e && npx playwright install
+    --with-deps chromium && npm test` against a real disposable stack
+    before trusting this suite in CI/pre-deploy.
 
 ## Run locally
 
@@ -1620,6 +1680,28 @@ and RAG grounding if enabled), and see your spend on `/usage`.
 
 ### 6. Update the live application
 
+⚠️ **Run the E2E suite before every deploy, not just the first one.**
+`e2e/` has a Playwright suite covering register → login → send a
+message and get a streamed reply → attach a file → generate a PDF →
+rename a conversation → delete a conversation → Google sign-in (via a
+test-only mocked-OAuth route — see `e2e/README.md`). Run it against a
+staging deployment if you have one, or at minimum locally against a
+disposable Postgres database (never against production — some of these
+tests register throwaway accounts and delete conversations):
+
+``` bash
+cd e2e
+cp .env.example .env   # point E2E_BASE_URL/E2E_BACKEND_URL at staging or localhost
+npm install
+npx playwright install --with-deps chromium
+npm test
+```
+
+See `e2e/README.md` for the full setup (including the one backend env
+var, `EASTA_E2E_MOCK_GOOGLE_OAUTH`, the Google Sign-In test needs) and
+what each spec covers. Treat a red run as a blocker the same way you'd
+treat a failed build — don't push past it "just this once."
+
 With **Auto Deploy** enabled, push future changes to the GitHub
 branch connected to Sevalla:
 
@@ -1757,6 +1839,7 @@ so there's no cost to running it "just in case."
 -   OpenRouter
 -   OpenAI Python SDK
 -   NVIDIA Nemotron
+-   Playwright (E2E tests -- see `e2e/`)
 -   GitHub
 -   Sevalla
 
