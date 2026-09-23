@@ -383,42 +383,36 @@ app.add_middleware(
 )
 
 
-# Two candidate locations, checked in order: the normal repo layout
-# (backend/app.py's parent.parent -- works for local dev, and for
-# Sevalla as long as its "build path" setting still checks out the
-# full repo and only scopes *build/run commands* to backend/, which is
-# the common behavior for this kind of PaaS setting), and a copy
-# living inside backend/ itself, in case a build path ever does
-# genuinely exclude everything outside it. Resolving via `Path(__file__)`
-# rather than a relative/CWD-based path so this works the same
-# regardless of what directory the process was actually started from.
+# Canonical location, confirmed from a real deploy: the backend's
+# Sevalla application builds from the `backend` build path, which only
+# checks out backend/ itself -- database/schema.sql at the repo root
+# genuinely does not exist in the deployed container (this isn't a
+# lookup bug; the earlier dual-candidate-path version of this code was
+# written before that was confirmed). schema.sql now lives inside
+# backend/ as the single source of truth, not duplicated at the repo
+# root. Resolving via `Path(__file__)` rather than a relative/CWD-based
+# path so this works the same regardless of what directory the process
+# was actually started from.
 _BACKEND_DIR = Path(__file__).resolve().parent
-_SCHEMA_SQL_CANDIDATES = [
-    _BACKEND_DIR.parent / "database" / "schema.sql",
-    _BACKEND_DIR / "database" / "schema.sql",
-]
+SCHEMA_SQL_PATH = _BACKEND_DIR / "database" / "schema.sql"
 
 
 def _find_schema_sql_path() -> Path:
-    for candidate in _SCHEMA_SQL_CANDIDATES:
-        if candidate.is_file():
-            return candidate
+    if SCHEMA_SQL_PATH.is_file():
+        return SCHEMA_SQL_PATH
 
-    checked = "\n".join(f"  - {c}" for c in _SCHEMA_SQL_CANDIDATES)
     raise RuntimeError(
-        "database/schema.sql not found -- checked:\n"
-        f"{checked}\n"
-        "If the backend is deployed from a build path that excludes "
-        "everything outside backend/ (e.g. a Sevalla 'build path' set "
-        "to `backend` that only checks out that subdirectory), copy "
-        "schema.sql into backend/database/schema.sql, or adjust the "
-        "build path so the full repository checkout is present on disk."
+        f"schema.sql not found at {SCHEMA_SQL_PATH} -- it's expected to "
+        "live inside the backend's own build path (backend/database/"
+        "schema.sql), not at a repo-root database/ that a Sevalla build "
+        "scoped to `backend` won't check out. If this path changed, "
+        "update SCHEMA_SQL_PATH above to match."
     )
 
 
 def apply_schema_migration() -> None:
-    """Applies database/schema.sql against DATABASE_URL. Called once
-    at startup (see `lifespan` below), before the app accepts any
+    """Applies backend/database/schema.sql against DATABASE_URL. Called
+    once at startup (see `lifespan` below), before the app accepts any
     requests -- replaces "remember to manually re-run schema.sql after
     every deploy," which caused three separate production incidents
     (most recently: users.is_admin missing live, which took down the
@@ -1022,7 +1016,7 @@ def resolve_api_key(api_key: str) -> int | None:
 
 # --- Cross-conversation memory (Phase 21) -----------------------------------
 # Backs the /account "Remembered" list (view/delete individual/clear all)
-# and build_memory_context_message() above -- see database/schema.sql's
+# and build_memory_context_message() above -- see backend/database/schema.sql's
 # user_memory table for the extraction/retention reasoning.
 
 def save_user_memory(
@@ -1095,7 +1089,7 @@ def clear_user_memory(user_id: int):
 
 
 # --- Organizations (Phase 22) -----------------------------------------------
-# Shared team workspaces. See database/schema.sql's organizations /
+# Shared team workspaces. See backend/database/schema.sql's organizations /
 # organization_members comment for the full design, including the
 # explicit "conversations stay private, only the knowledge base and
 # billing are shared" decision. Route-level guards below
@@ -1334,7 +1328,7 @@ def get_organization_usage(org_id: int):
 
 # --- Documents (RAG knowledge base) -----------------------------------------
 # Phase 22: a document belongs to either a user (personal) or an org
-# (shared with every member) -- see database/schema.sql's
+# (shared with every member) -- see backend/database/schema.sql's
 # documents_owner_check. Exactly one of user_id/org_id is passed to
 # each helper below; the caller (the route) decides which, after its
 # own auth/membership check.
@@ -1632,7 +1626,7 @@ def delete_conversation(conversation_id: int):
     (get_conversation(conversation_id, user_id)) before calling this.
     messages/generated_files/canvas_artifacts all have ON DELETE
     CASCADE on their conversation_id foreign key (see
-    database/schema.sql), and usage_logs has ON DELETE SET NULL (kept
+    backend/database/schema.sql), and usage_logs has ON DELETE SET NULL (kept
     for historical cost accounting rather than deleted) -- nothing
     else to clean up manually here."""
     with psycopg.connect(DATABASE_URL) as connection:
@@ -1937,7 +1931,7 @@ def upsert_canvas_artifact(
 ):
     """Creates or overwrites the conversation's single canvas
     artifact — the canvas holds one "current working artifact" at a
-    time (see database/schema.sql), so a follow-up generation call
+    time (see backend/database/schema.sql), so a follow-up generation call
     updates it in place rather than creating a new one."""
     with psycopg.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
@@ -2122,7 +2116,7 @@ def model_chain_for_images() -> list[str]:
 # --- RAG: grounding on the user's own documents -----------------------------
 # Keyword search over Postgres tsvector. No embeddings, no extra services,
 # works on a stock managed Postgres instance. See documents table in
-# database/schema.sql. Swap for pgvector + real embeddings later if you
+# backend/database/schema.sql. Swap for pgvector + real embeddings later if you
 # need semantic (not just keyword) matching.
 
 def retrieve_relevant_chunks(query: str, user_id: int, limit: int = 3):
@@ -4517,7 +4511,7 @@ def maybe_summarize_conversation(conversation_id: int, conversation_row):
 # --- Cross-conversation memory -----------------------------------------
 # Short, durable facts about a user (stated preferences, standing
 # context) extracted from what they explicitly say, distinct from any
-# single conversation's own history -- see database/schema.sql's
+# single conversation's own history -- see backend/database/schema.sql's
 # user_memory table. Much more conservative than summarization above:
 # summarization runs unconditionally once a conversation is long enough
 # and folds in anything relevant; this only fires on messages that look
@@ -5532,7 +5526,7 @@ def get_session(request: Request):
     # session..." with no way to even reach a page showing a clear
     # error. Degrade to is_admin: false and report the real error
     # instead -- the rest of the app stays usable while the underlying
-    # issue (almost always: re-run database/schema.sql) gets fixed.
+    # issue (almost always: re-run backend/database/schema.sql) gets fixed.
     try:
         is_admin = is_user_admin(user_id)
     except Exception as error:  # noqa: BLE001 - best-effort, see comment above
@@ -7353,7 +7347,7 @@ def delete_organization_document_route(
 # Platform-wide, instance-owner-only visibility -- distinct from an
 # organization owner's combined dashboard above (that's scoped to one
 # org; this is every user/org/conversation on the whole instance). See
-# require_admin() and the is_admin column comment in database/schema.sql
+# require_admin() and the is_admin column comment in backend/database/schema.sql
 # for how someone gets this -- there's no self-service route, on purpose.
 
 @app.get("/api/admin/stats")

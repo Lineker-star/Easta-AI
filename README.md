@@ -94,7 +94,7 @@ production traffic. Pick these up in Cursor:
   characters with a `(truncated)` marker rather than silently cutting
   content. ⚠️ **Prototype-grade**: image attachments are stored as
   base64 directly in the new `messages.attachments` JSONB column
-  (see `database/schema.sql`) — fine for a demo/small-team app, but
+  (see `backend/database/schema.sql`) — fine for a demo/small-team app, but
   swap for object storage (S3/R2/etc, storing just a URL) before
   relying on this at real scale. Scanned/image-only PDFs have no
   extractable text layer and are not OCR'd (see "Suggested next
@@ -220,7 +220,7 @@ production traffic. Pick these up in Cursor:
   new one), and a **Plan** section showing the account's plan
   (`GET /api/account/plan`) next to a Free vs. Premium comparison
   table with a disabled "Upgrade — Coming soon" button. A new
-  `users.plan` column (`database/schema.sql`, `DEFAULT 'free'`) backs
+  `users.plan` column (`backend/database/schema.sql`, `DEFAULT 'free'`) backs
   this. ⚠️ **Scaffolding, not enforcement**: nothing anywhere in the
   app reads `plan` to gate or limit behavior — every account is fully
   unrestricted regardless of its value, and the comparison table's
@@ -323,7 +323,7 @@ production traffic. Pick these up in Cursor:
     where brute-forcing is infeasible regardless of hash speed and a
     slow hash would add real latency to every call — the same
     reasoning GitHub/Stripe-style API keys use. Explained in a comment
-    above the `api_keys` table in `database/schema.sql`.
+    above the `api_keys` table in `backend/database/schema.sql`.
   - **Public API**: a small, versioned `/v1/*` surface, separate from
     the internal `/api/*` endpoints the web frontend uses (those can
     change without notice; `/v1/*` won't) — `POST /v1/chat` (send a
@@ -786,7 +786,7 @@ production traffic. Pick these up in Cursor:
   the same way `documents`/RAG grounding already does — not a `LIKE`
   scan. New `messages.search_vector` column (`tsvector`) + GIN index,
   populated at insert time in `save_message()`; backfilled for
-  pre-existing rows in `database/schema.sql`. One result per
+  pre-existing rows in `backend/database/schema.sql`. One result per
   conversation (its single best-ranked match, title or message),
   ranked and deduplicated in SQL via a `DISTINCT ON` over a `UNION ALL`
   of title/message matches. The matched snippet is highlighted with
@@ -855,7 +855,7 @@ production traffic. Pick these up in Cursor:
     future careless edit to that one query.
   - Token stored as **plaintext**, not hashed like `api_keys.key_hash`
     — a deliberate, different tradeoff from that column, explained in
-    `database/schema.sql`: a share link is meant to be re-shown/re-
+    `backend/database/schema.sql`: a share link is meant to be re-shown/re-
     copied later (reopening the Share menu item), not a write-once
     secret, and it only grants read-only access to one conversation,
     not account access.
@@ -934,7 +934,7 @@ production traffic. Pick these up in Cursor:
     things: the documents (RAG knowledge base) below, and the
     combined cost dashboard for owners. This is the safer default
     most team tools ship (see the comment block above `organizations`
-    in `database/schema.sql`), and no reason to deviate was found.
+    in `backend/database/schema.sql`), and no reason to deviate was found.
   - Org creation is instant (`POST /api/organizations` creates the
     org and adds its creator as `owner` in one transaction — an org
     can never exist with zero members). Joining is via a shareable
@@ -997,14 +997,14 @@ production traffic. Pick these up in Cursor:
     HTML and API behavior were checked, not actual JS execution in a
     browser. No real Postgres migration was run either (see the
     schema.sql migration note earlier in this file); apply
-    `database/schema.sql`'s new `ALTER TABLE`/`CREATE TABLE`
+    `backend/database/schema.sql`'s new `ALTER TABLE`/`CREATE TABLE`
     statements by hand against any existing database.
 - **Admin view (Phase 23)** — a new `users.is_admin` boolean (default
   `false`). Deliberately no API route ever sets it — there's no self-
   service or promote/demote endpoint anywhere in the app, on purpose,
   to avoid any path to privilege escalation. Grant it by hand:
   `UPDATE users SET is_admin = true WHERE username = '...';` (see the
-  comment above the column in `database/schema.sql`).
+  comment above the column in `backend/database/schema.sql`).
   - `require_admin()` in `backend/app.py` gates two new endpoints with
     a plain 403 (not org-membership's existence-hiding 404 — there's
     nothing to hide here, every user already knows `/api/admin/*`
@@ -1330,7 +1330,7 @@ production traffic. Pick these up in Cursor:
     before trusting this suite in CI/pre-deploy.
 - **Production incident fix: "Failed to fetch" on `/chat`, and raw
   i18n keys in the sidebar.** Root cause of both was the exact
-  migration gap `database/schema.sql`'s own header comment warns
+  migration gap `backend/database/schema.sql`'s own header comment warns
   about: production hadn't been re-migrated since before Phase 18, so
   `users.is_admin` (Phase 23) didn't exist live. That alone was enough
   to take down the *entire app* for every logged-in user, plus it
@@ -1374,7 +1374,7 @@ production traffic. Pick these up in Cursor:
     still to re-run the migration, not to make every query
     individually defensive.
   - **The definitive fix at the time was operational, not code**:
-    re-run `database/schema.sql` against the production database.
+    re-run `backend/database/schema.sql` against the production database.
     That's since been automated entirely — see "Automatic schema
     migration on startup" below, added specifically because this exact
     manual step had already caused three separate incidents.
@@ -1410,7 +1410,7 @@ production traffic. Pick these up in Cursor:
   documented above, most recently the one right above this entry.
   - New `apply_schema_migration()` in `backend/app.py`, run once via a
     `lifespan` context manager before the app accepts its first
-    request: reads `database/schema.sql` and executes the whole file
+    request: reads `backend/database/schema.sql` and executes the whole file
     as a single `cursor.execute()` call with no parameters. Sent that
     way deliberately — Postgres's own parser then handles statement
     boundaries and comments correctly (some of `schema.sql`'s own
@@ -1434,19 +1434,13 @@ production traffic. Pick these up in Cursor:
     `EASTA: startup schema migration failed: ...` with the real
     underlying error otherwise — also reported to Sentry via Phase
     26's `report_error()` when configured.
-  - Resolves `database/schema.sql`'s location via the running file's
-    own path (`Path(__file__)`), not the working directory, checking
-    two candidates in order: the normal repo layout
-    (`backend/app.py`'s parent directory's sibling `database/` folder)
-    and a copy inside `backend/database/` as a fallback. This matters
-    specifically because the backend's Sevalla application builds from
-    the `backend` build path (a sibling of `database/`, not a parent —
-    see "Deploy the backend" above): if a future build configuration
-    ever genuinely excludes everything outside `backend/` from the
-    checkout, the very clear `RuntimeError` this raises tells you
-    exactly what's missing and exactly how to fix it (copy
-    `schema.sql` into `backend/database/schema.sql`) rather than
-    failing in a way that's hard to diagnose.
+  - Resolves `backend/database/schema.sql`'s location via the running
+    file's own path (`Path(__file__)`), not the working directory --
+    the file lives inside `backend/`'s own build path, as one single
+    canonical copy, not duplicated at the repo root. If it's ever
+    missing, the `RuntimeError` this raises says exactly where it
+    looked and exactly what to do about it, rather than a bare
+    `FileNotFoundError`.
   - The "Deploy PostgreSQL" and "Update the live application" sections
     below were rewritten accordingly — the manual `psql -f schema.sql`
     commands are kept only as an optional, still-safe-to-run-anytime
@@ -1458,17 +1452,29 @@ production traffic. Pick these up in Cursor:
     call and logs the expected message; a DB error during migration is
     fatal (`TestClient`'s startup genuinely fails to enter, the same
     as a real ASGI server failing to boot) and reported via
-    `report_error()`; and a simulated missing-file scenario (standing
-    in for a Sevalla build-path change that excludes `database/`)
-    raises the clear, actionable `RuntimeError` rather than a bare
+    `report_error()`; and a simulated missing-file scenario raises the
+    clear, actionable `RuntimeError` rather than a bare
     `FileNotFoundError`, and is equally fatal. `py_compile` passes.
-    ⚠️ **Not verified**: an actual run against a real Postgres database
-    (no live Postgres available in this environment), and Sevalla's
-    real build-path checkout behavior (documented above as the
-    single biggest remaining assumption — watch the first backend
-    deploy log after this ships to confirm it either applies
-    successfully or fails with the clear, actionable error rather than
-    silently skipping).
+  - **Update, confirmed from an actual deploy crash log**: the first
+    version of this fix guessed at Sevalla's build-path behavior and
+    checked two candidate locations for `schema.sql` (the repo root
+    and a copy inside `backend/`), on the theory that a "build path"
+    setting usually just scopes build/run *commands* rather than
+    physically excluding files from the checkout. That theory was
+    wrong for this setup: the crash log confirmed the backend's
+    Sevalla build path (`backend`) only checks out `backend/` itself,
+    so `database/schema.sql` at the repo root genuinely didn't exist
+    in the deployed container — not a lookup bug, the file was
+    actually absent. Rather than keep a second copy of the file around
+    as a permanent fallback (which would drift out of sync over time —
+    exactly the class of problem this whole feature exists to
+    eliminate), `schema.sql` was relocated to live at
+    `backend/database/schema.sql` as the single source of truth, and
+    every reference to the old `database/schema.sql` path across the
+    codebase (this file, `e2e/README.md`, and the comments throughout
+    `backend/app.py` that pointed to it) was updated to match. The
+    path-resolution code is simpler now too — one confirmed location,
+    not a guessed fallback chain.
 
 ## Run locally
 
@@ -1515,10 +1521,18 @@ Exit PostgreSQL:
 \q
 ```
 
-Now create the EASTA tables using the included schema:
+That's it for PostgreSQL itself — you do **not** need to manually
+create the EASTA tables. The backend applies
+`backend/database/schema.sql` automatically the first time it starts
+(see "Automatic schema migration on startup" above), against whatever
+empty database you just created.
+
+If you want the tables to exist before that first run anyway (e.g. to
+poke around in `psql` first), the schema also still applies safely by
+hand at any time:
 
 ``` bash
-cd database
+cd backend/database
 
 psql \
 -h localhost \
@@ -1674,7 +1688,7 @@ psql \
 -U USER \
 -p PORT \
 -d DATABASE \
--f database/schema.sql
+-f backend/database/schema.sql
 ```
 
 Replace the uppercase placeholders with the External Connection
@@ -1867,7 +1881,7 @@ application.
 **The database migrates itself.** Every backend startup — including
 the one this redeploy just triggered — runs
 `apply_schema_migration()` before accepting any requests: it applies
-the full `database/schema.sql` against `DATABASE_URL` and only then
+the full `backend/database/schema.sql` against `DATABASE_URL` and only then
 starts serving traffic. If your change modified `schema.sql` (added a
 column, a table, a constraint, ...), it's already live by the time the
 new backend instance is actually taking requests — there's no longer a
@@ -1881,7 +1895,7 @@ changed something — every statement in `schema.sql` is written to be
 additive and idempotent (`CREATE TABLE IF NOT EXISTS` for new tables,
 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for columns added to a
 table that already existed — see the note at the top of
-`database/schema.sql` for why both are needed), so re-applying
+`backend/database/schema.sql` for why both are needed), so re-applying
 everything on a database that already has all the changes is a no-op,
 not a risk.
 
@@ -1895,7 +1909,7 @@ One thing worth knowing about this specific setup: the backend's
 Sevalla application builds from the `backend` build path (see
 "Backend build settings" above), which is a sibling of `database/`,
 not a parent of it — `apply_schema_migration()` resolves
-`database/schema.sql`'s location via the running file's own path
+`backend/database/schema.sql`'s location via the running file's own path
 rather than the working directory, so this works as long as Sevalla's
 build still checks out the full repository (it does, for a standard
 git-connected build — "build path" scopes which directory the
@@ -1910,7 +1924,7 @@ inspecting a database before the backend's next deploy, or confirming
 a fix without waiting on a redeploy:
 
 ``` bash
-psql -h HOST -U USER -p PORT -d DATABASE -f database/schema.sql
+psql -h HOST -U USER -p PORT -d DATABASE -f backend/database/schema.sql
 ```
 
 ## Suggested next steps (in Cursor)

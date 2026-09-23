@@ -21,10 +21,14 @@ it at production by mistake.
 
 ## Prerequisites
 
-1. **A disposable Postgres database**, migrated with
-   `database/schema.sql` — the same `psql ... -f database/schema.sql`
-   command the main README's "Run locally" / "Deploy" sections use,
-   just pointed at a throwaway database rather than your real one.
+1. **A disposable Postgres database** — it can start out completely
+   empty. The backend migrates it automatically on every startup (see
+   `apply_schema_migration()` in `backend/app.py`, and
+   `backend/database/schema.sql`), so there's no separate `psql -f`
+   step to run first. If you want the schema applied before the
+   backend's first boot anyway (e.g. to inspect it), the same manual
+   command the main README's "Deploy" section documents as an optional
+   fallback works here too: `psql ... -f backend/database/schema.sql`.
 2. **The backend running** against that database (`uvicorn app:app`
    from `backend/`, or however you normally run it), with a real
    `OPENROUTER_API_KEY` — the message/attachment/PDF-generation tests
